@@ -1,0 +1,26 @@
+{
+  "0": {
+    "cpu_capacity": 0.2,
+    "compute_cost": 0.8,
+    "throughput_mbps": 2.0,
+    "energy_efficiency": 0.2,
+    "e_cmp": 0.8,
+    "e_up": 0.7,
+    "e_down": 0.7,
+    "e_cmp_w": 2.0,
+    "e_up_w": 1.0,
+    "e_down_w": 1.0
+  },
+  "1": {
+    "cpu_capacity": 0.95,
+    "compute_cost": 0.1,
+    "throughput_mbps": 70.0,
+    "energy_efficiency": 0.9,
+    "e_cmp": 0.2,
+    "e_up": 0.1,
+    "e_down": 0.1,
+    "e_cmp_w": 1.0,
+    "e_up_w": 0.5,
+    "e_down_w": 0.5
+  }
+}

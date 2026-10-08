@@ -10,6 +10,9 @@ import torchvision
 import logging
 
 from flcore.servers.serveravg import FedAvg
+from flcore.servers.serverfedload import FedLoad
+from flcore.servers.serverherafl import HERAFL
+from flcore.servers.serverprofiledavg import ProfiledFedAvg
 from flcore.servers.serverpFedMe import pFedMe
 from flcore.servers.serverperavg import PerAvg
 from flcore.servers.serverprox import FedProx
@@ -187,7 +190,13 @@ def run(args):
             args.head = copy.deepcopy(args.model.fc)
             args.model.fc = nn.Identity()
             args.model = BaseHeadSplit(args.model, args.head)
-            server = FedAvg(args, i)
+            server = ProfiledFedAvg(args, i) if args.record_resources else FedAvg(args, i)
+
+        elif args.algorithm == "FedLoad":
+            server = FedLoad(args, i)
+
+        elif args.algorithm == "HERAFL":
+            server = HERAFL(args, i)
 
         elif args.algorithm == "Local":
             server = Local(args, i)
@@ -499,7 +508,22 @@ if __name__ == "__main__":
     parser.add_argument('-cmss', "--collaberative_model_select_strategy", type=int, default=1)
 
 
+    parser.add_argument('--pruning-arms', type=float, nargs='+', default=[1.0, 0.8, 0.6, 0.4],
+                        help='FedLoad/HERAFL hidden channel/neuron retention ratios (0, 1].')
+    parser.add_argument('--record-resources', action='store_true',
+                        help='Log FedAvg client accuracy and estimated resources alongside HDF5 results.')
+    parser.add_argument('--bandit-alpha', type=float, default=0.25)
+    parser.add_argument('--bandit-beta', type=float, default=0.6)
+    parser.add_argument('--policy-seed', type=int, default=42)
+    parser.add_argument('--reward-weights', type=float, nargs=3, default=[0.6, 0.2, 0.2],
+                        metavar=('ACCURACY', 'ENERGY', 'TIME'))
+    parser.add_argument('--client-profiles', type=str, default=None,
+                        help='JSON resource profiles for FedLoad/HERAFL and FedAvg with --record-resources.')
+    parser.add_argument('--pruning-round-timeout', type=float, default=300.0,
+                        help='Modeled per-client deadline in seconds; HERAFL adapts it upward.')
     args = parser.parse_args()
+    args.algorithm = {'fedload': 'FedLoad', 'herafl': 'HERAFL', 'hera-fl': 'HERAFL',
+                      'hera_fl': 'HERAFL'}.get(args.algorithm.lower(), args.algorithm)
 
     os.environ["CUDA_VISIBLE_DEVICES"] = args.device_id
 

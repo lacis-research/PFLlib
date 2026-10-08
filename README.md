@@ -32,6 +32,10 @@ Figure 1: An Example for FedAvg. You can create a scenario using `generate_DATA.
   booktitle = {Proceedings of the 31st ACM SIGKDD Conference on Knowledge Discovery and Data Mining}
 }
 ```
+### FedLoad e HERAFL
+
+Adaptações nativas dos algoritmos de `mininetfed_iwcmc`, usando servidores, clientes, modelos e dados do PFLlib: [execução, perfis de recursos e limitações](docs/heterogeneous_algorithms.md).
+
 ### Key Features
 
 - **39 traditional FL ([tFL](#traditional-fl-tfl)) and personalized FL ([pFL](#personalized-fl-pfl)) algorithms, 3 scenarios, and 24 datasets.**
