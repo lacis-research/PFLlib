@@ -1,17 +1,29 @@
-# Install miniconda
-wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
-sh Miniconda3-latest-Linux-x86_64.sh
+#!/usr/bin/env bash
+set -e
 
-# Configure ~/.bashrc
-echo alias p=\"ps -aux|grep zhangjq|grep 'python -u'\" >> ~/.bashrc
-echo alias n=\'nvidia-smi\' >> ~/.bashrc
-echo alias d=\'du -hs * | sort -h\' >> ~/.bashrc
-echo alias del_pycache=\'find . -type d -name __pycache__ -prune -exec rm -rf {} \;\' >> ~/.bashrc
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+MINICONDA_DIR="${MINICONDA_DIR:-$HOME/miniconda3}"
 
-echo export PIP_CACHE_DIR='$PWD'/tmp >> ~/.bashrc
-echo # export TMPDIR='$PWD'/tmp >> ~/.bashrc
+# Reuse an existing installation.
+if command -v conda >/dev/null 2>&1; then
+    CONDA_BASE="$(conda info --base)"
+elif [[ -x "$MINICONDA_DIR/bin/conda" ]]; then
+    CONDA_BASE="$MINICONDA_DIR"
+else
+    INSTALLER="$SCRIPT_DIR/Miniconda3-latest-Linux-x86_64.sh"
+    wget -O "$INSTALLER" https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+    bash "$INSTALLER" -p "$MINICONDA_DIR"
+    CONDA_BASE="$MINICONDA_DIR"
+fi
 
-# Install python packages
-source ~/.bashrc
-conda env create -f env_cuda_latest.yaml
+# .bashrc can return early in noninteractive shells; load Conda directly.
+source "$CONDA_BASE/etc/profile.d/conda.sh"
+
+# Keep the package cache local without editing shell configuration.
+export PIP_CACHE_DIR="$SCRIPT_DIR/tmp"
+mkdir -p "$PIP_CACHE_DIR"
+
+conda env create -f "$SCRIPT_DIR/env_cuda_latest.yaml"
 conda activate pfllib
+
+echo 'Ambiente preparado. No seu terminal, execute: conda activate pfllib'

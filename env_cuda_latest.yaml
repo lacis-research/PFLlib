@@ -17,6 +17,7 @@ dependencies:
   - matplotlib
   - click
   - pip:  # manually install with mirror URLs if a timeout occurs
+    - numpy<2  # keep pip dependencies compatible with torch 2.0.1
     - torch==2.0.1
     - torchaudio
     - torchtext
@@ -24,7 +25,7 @@ dependencies:
     - calmsize
     - memory-profiler
     - portalocker
-    - cvxpy
+    - cvxpy==1.6.5  # supports NumPy 1.x alongside torch 2.0.1
     - higher
     - diffusers
     - accelerate
