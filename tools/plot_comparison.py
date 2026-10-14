@@ -73,25 +73,54 @@ def read_policy(path):
     return values
 
 
+def latest_common_goal(results_dir, dataset, algorithms):
+    """Choose a single latest completed experiment shared by every method."""
+    timestamps = {}
+    for algorithm in algorithms:
+        pattern = re.compile(re.escape(f'{dataset}_{algorithm}_') + r'(.+)_(\d+)\.h5$')
+        goals = {}
+        for path in results_dir.glob('**/*.h5'):
+            match = pattern.fullmatch(path.name)
+            if match:
+                goal = match[1]
+                goals[goal] = max(goals.get(goal, 0), path.stat().st_mtime)
+        timestamps[algorithm] = goals
+    common = set.intersection(*(set(goals) for goals in timestamps.values()))
+    if not common:
+        raise ValueError(f'No complete comparison for {dataset} shared by {", ".join(algorithms)}.')
+    return max(common, key=lambda goal: max(goals[goal] for goals in timestamps.values()))
+
+
 def main():
     root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--results-dir', type=Path, default=root / 'results')
     parser.add_argument('--dataset', default='MNIST')
-    parser.add_argument('--goal', default='test')
+    parser.add_argument('--goal', help='Experiment goal; default: test.')
+    parser.add_argument('--latest', action='store_true', help='Compare the latest goal shared by all requested methods.')
     parser.add_argument('--algorithms', nargs='+', default=['FedAvg', 'FedLoad', 'HERAFL'])
     parser.add_argument('--runs', type=int, nargs='+', help='Repetition indices; default: all matching files.')
     parser.add_argument('--eval-gap', type=int, default=1, help='The -eg value used for ALL compared experiments.')
     parser.add_argument('--output-dir', type=Path)
-    parser.add_argument('--formats', nargs='+', choices=['png', 'pdf', 'svg'], default=['png', 'pdf'])
+    parser.add_argument('--formats', nargs='+', choices=['png'], default=['png'])
     parser.add_argument('--extra-metrics', action='store_true', help='Also generate the original loss/AUC and per-round resource plots.')
     args = parser.parse_args()
     if args.eval_gap < 1:
         parser.error('--eval-gap must be positive.')
     if args.runs is not None and any(r < 0 for r in args.runs):
         parser.error('--runs must be nonnegative.')
-    aliases = {'herafl': 'HERAFL', 'hera-fl': 'HERAFL', 'hera_fl': 'HERAFL', 'fedload': 'FedLoad'}
+    aliases = {'herafl': 'HERAFL', 'hera-fl': 'HERAFL', 'hera_fl': 'HERAFL', 'fedload': 'FedLoad', 'fedavg': 'FedAvg'}
     algorithms = list(dict.fromkeys(aliases.get(a.lower(), a) for a in args.algorithms))
+    if args.latest and args.goal is not None:
+        parser.error('--latest and --goal are mutually exclusive.')
+    if args.latest:
+        try:
+            args.goal = latest_common_goal(args.results_dir, args.dataset, algorithms)
+        except ValueError as error:
+            parser.error(str(error))
+    else:
+        args.goal = args.goal or 'test'
+    print(f'Comparing dataset={args.dataset}, goal={args.goal}')
     metrics = {name: {} for name in METRICS}
     resources = {name: {} for name in RESOURCES}
     policy_runs = {}
@@ -99,11 +128,15 @@ def main():
         prefix = f'{args.dataset}_{algorithm}_{args.goal}_'
         pattern = re.compile(re.escape(prefix) + r'(\d+)\.h5$')
         matching = []
-        for path in args.results_dir.glob('*.h5'):
+        for path in args.results_dir.glob('**/*.h5'):
             match = pattern.fullmatch(path.name)
             if match and (args.runs is None or int(match[1]) in args.runs):
                 matching.append((int(match[1]), path))
-        matching.sort()
+        latest = {}
+        for run, path in matching:
+            if run not in latest or path.stat().st_mtime > latest[run].stat().st_mtime:
+                latest[run] = path
+        matching = sorted(latest.items())
         if not matching:
             parser.error(f'No results for {algorithm}: expected {args.results_dir / (prefix + "<run>.h5")}')
         if args.runs is not None:
@@ -127,7 +160,8 @@ def main():
                         continue
                     if not np.isfinite(values).all():
                         print(f'Notice: {path.name}: nonfinite {name} values are omitted.')
-                    series = {i * args.eval_gap: float(v * scale) for i, v in enumerate(values) if np.isfinite(v)}
+                    rounds = np.asarray(stream['eval_rounds']) if 'eval_rounds' in stream else np.arange(len(values)) * args.eval_gap
+                    series = {int(r): float(v * scale) for r, v in zip(rounds, values) if np.isfinite(v)}
                     metrics[name].setdefault(algorithm, []).append(series)
                     if name == 'rs_test_acc':
                         lengths.append(len(values))
@@ -143,7 +177,7 @@ def main():
             print(f'Notice: {algorithm} has unequal run lengths; each round uses available runs only.')
         if policy_count < len(matching):
             print(f'Notice: {algorithm}: resource logs available for {policy_count}/{len(matching)} runs.')
-    output = args.output_dir or args.results_dir / 'comparison' / f'{args.dataset}_{args.goal}'
+    output = args.output_dir or args.results_dir / 'comparison' / ('__vs__'.join(algorithms) + f'_{args.dataset}_{args.goal}')
     output.mkdir(parents=True, exist_ok=True)
     global_accuracy = {algorithm: [{r: v / 100 for r, v in series.items()} for series in runs]
                        for algorithm, runs in metrics['rs_test_acc'].items()}

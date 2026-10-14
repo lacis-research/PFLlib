@@ -14,7 +14,8 @@ class ProfiledFedAvg(FedAvg):
     def __init__(self, args, times):
         super().__init__(args, times)
         self.round_reports = []
-        profiles = {}
+        from flcore.heterogeneity.profiles import profiles_for_algorithm
+        profiles = profiles_for_algorithm(self.num_clients, args.policy_seed)
         if args.client_profiles:
             with open(args.client_profiles, encoding='utf-8') as stream:
                 profiles = json.load(stream)
@@ -25,7 +26,7 @@ class ProfiledFedAvg(FedAvg):
                 raise ValueError(f'Unknown client profile IDs: {sorted(unknown)}')
         self.max_samples = max(c.train_samples for c in self.clients)
         for client in self.clients:
-            client.profile = profiles.get(str(client.id), {})
+            client.configure_profile(profiles.get(str(client.id), {}))
             FedLoad._validate_profile(client.profile)
         print('Resource logging: compute time measured; network and energy estimated from profiles.')
 
@@ -51,6 +52,5 @@ class ProfiledFedAvg(FedAvg):
 
     def save_results(self):
         super().save_results()
-        path = os.path.join('../results', f'{self.dataset}_{self.algorithm}_{self.goal}_{self.times}_policy.json')
-        with open(path, 'w', encoding='utf-8') as stream:
-            json.dump(self.round_reports, stream, indent=2, allow_nan=False)
+        from flcore.heterogeneity.results import save_policy_results
+        save_policy_results(self)

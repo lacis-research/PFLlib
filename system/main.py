@@ -4,6 +4,11 @@ import torch
 import argparse
 import os
 import time
+import random
+import sys
+import json
+from pathlib import Path
+from flcore.trainmodel.mininet_models import MininetCNN
 import warnings
 import numpy as np
 import torchvision
@@ -82,8 +87,16 @@ def run(args):
         print("Creating server and clients ...")
         start = time.time()
 
+        if args.algorithm in ('FedLoad', 'HERAFL'):
+            torch.manual_seed(args.policy_seed + i)
+            np.random.seed(args.policy_seed + i)
+            random.seed(args.policy_seed + i)
         # Generate args.model
-        if model_str == "MLR": # convex
+        if model_str == "MininetCNN":
+            config = Path('../dataset') / args.dataset / 'config.json'
+            dataset_name = json.loads(config.read_text()).get('dataset', args.dataset) if config.exists() else args.dataset
+            args.model = MininetCNN(dataset_name, args.num_classes).to(args.device)
+        elif model_str == "MLR": # convex
             if "MNIST" in args.dataset:
                 args.model = Mclr_Logistic(1*28*28, num_classes=args.num_classes).to(args.device)
             elif "Cifar10" in args.dataset:
@@ -508,22 +521,49 @@ if __name__ == "__main__":
     parser.add_argument('-cmss', "--collaberative_model_select_strategy", type=int, default=1)
 
 
-    parser.add_argument('--pruning-arms', type=float, nargs='+', default=[1.0, 0.8, 0.6, 0.4],
+    parser.add_argument('--pruning-arms', type=float, nargs='+', default=np.linspace(0.0625, 1.0, 20).tolist(),
                         help='FedLoad/HERAFL hidden channel/neuron retention ratios (0, 1].')
     parser.add_argument('--record-resources', action='store_true',
                         help='Log FedAvg client accuracy and estimated resources alongside HDF5 results.')
-    parser.add_argument('--bandit-alpha', type=float, default=0.25)
-    parser.add_argument('--bandit-beta', type=float, default=0.6)
+    parser.add_argument('--bandit-alpha', type=float, default=1.0)
+    parser.add_argument('--bandit-beta', type=float, default=0.75)
     parser.add_argument('--policy-seed', type=int, default=42)
-    parser.add_argument('--reward-weights', type=float, nargs=3, default=[0.6, 0.2, 0.2],
+    parser.add_argument('--reward-weights', type=float, nargs=3, default=[0.75, 0.05, 0.2],
                         metavar=('ACCURACY', 'ENERGY', 'TIME'))
     parser.add_argument('--client-profiles', type=str, default=None,
                         help='JSON resource profiles for FedLoad/HERAFL and FedAvg with --record-resources.')
-    parser.add_argument('--pruning-round-timeout', type=float, default=300.0,
+    parser.add_argument('--pruning-round-timeout', type=float, default=None,
                         help='Modeled per-client deadline in seconds; HERAFL adapts it upward.')
+    parser.add_argument('--bandit-alpha-strategy', choices=['binary', 'proportional'], default='binary')
+    parser.add_argument('--straggler-predictor', choices=['true', 'false'], default='true')
+    parser.add_argument('--scenario', choices=['iid', 'non-iid'], default='iid')
+    parser.add_argument('--reference-training', action='store_true', help='Use the Mininet optimizer with MininetCNN.')
     args = parser.parse_args()
+    args.straggler_predictor = args.straggler_predictor == 'true'
+    if args.model == 'MininetCNN':
+        args.reference_training = True
     args.algorithm = {'fedload': 'FedLoad', 'herafl': 'HERAFL', 'hera-fl': 'HERAFL',
                       'hera_fl': 'HERAFL'}.get(args.algorithm.lower(), args.algorithm)
+
+    if args.algorithm in ('FedLoad', 'HERAFL'):
+        config = Path('../dataset') / args.dataset / 'config.json'
+        metadata = json.loads(config.read_text()) if config.exists() else {}
+        defaults = {'model': ('CNN', ['-m', '--model']),
+                    'global_rounds': (100, ['-gr', '--global_rounds']),
+                    'num_clients': (metadata.get('num_clients', 20), ['-nc', '--num_clients']),
+                    'num_classes': (metadata.get('num_classes', 10), ['-ncl', '--num_classes']),
+                    'scenario': ('non-iid' if metadata.get('non_iid', False) else 'iid', ['--scenario']),
+                    'join_ratio': (0.1, ['-jr', '--join_ratio']),
+                    'batch_size': (64, ['-lbs', '--batch_size']),
+                    'local_epochs': (10, ['-ls', '--local_epochs'])}
+        for name, (value, flags) in defaults.items():
+            if not any(a.split('=')[0] in flags for a in sys.argv[1:]):
+                setattr(args, name, value)
+        args.reference_training = args.model == 'MininetCNN'
+        if args.reference_training and not any(a.split('=')[0] in ('-lr', '--local_learning_rate') for a in sys.argv[1:]):
+            config = Path('../dataset') / args.dataset / 'config.json'
+            dataset_name = json.loads(config.read_text()).get('dataset', args.dataset) if config.exists() else args.dataset
+            args.local_learning_rate = 0.001 if dataset_name.lower().replace('-', '') in ('cifar10', 'cinic10') else 0.01
 
     os.environ["CUDA_VISIBLE_DEVICES"] = args.device_id
 

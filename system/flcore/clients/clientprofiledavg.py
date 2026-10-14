@@ -6,6 +6,7 @@ from flcore.clients.clientfedload import clientFedLoad
 
 class clientProfiledAVG(clientAVG, clientFedLoad):
     def train(self):
+        self.sample_system_state()
         self._synchronize()
         started = time.perf_counter()
         super().train()

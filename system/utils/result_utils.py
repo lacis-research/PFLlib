@@ -27,6 +27,12 @@ def get_all_results_for_one_algo(algorithm="", dataset="", goal="", times=10):
 def read_data_then_delete(file_name, delete=False):
     file_path = "../results/" + file_name + ".h5"
 
+    if not os.path.exists(file_path):
+        from pathlib import Path
+        candidates = list(Path('../results').glob('**/' + file_name + '.h5'))
+        if not candidates:
+            raise FileNotFoundError(file_path)
+        file_path = str(max(candidates, key=lambda path: path.stat().st_mtime))
     with h5py.File(file_path, 'r') as hf:
         rs_test_acc = np.array(hf.get('rs_test_acc'))
 

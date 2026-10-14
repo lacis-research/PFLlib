@@ -143,6 +143,8 @@ class NativeServerTests(unittest.TestCase):
             stack.enter_context(patch('flcore.clients.clientbase.read_client_data', return_value=data))
             stack.enter_context(patch.object(cls, 'save_results'))
             stack.enter_context(patch.object(cls, 'save_global_model'))
+            if hasattr(cls, 'save_policy_results'):
+                stack.enter_context(patch.object(cls, 'save_policy_results'))
             stack.enter_context(patch('builtins.open', mock_open()))
             stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
             server = cls(args, 0)
@@ -155,14 +157,14 @@ class NativeServerTests(unittest.TestCase):
         from flcore.servers.serverherafl import HERAFL
         for cls in (FedLoad, HERAFL):
             server, original = self.run_server(cls, self.make_args(algorithm=cls.__name__))
-            self.assertEqual(len(server.rs_test_acc), 2)
-            self.assertEqual(len(server.round_reports), 2)
+            self.assertEqual(len(server.rs_test_acc), 1)
+            self.assertEqual(len(server.round_reports), 1)
             self.assertTrue(any(not torch.equal(a, b) for a, b in zip(original.parameters(), server.global_model.parameters())))
             for report in server.round_reports:
                 self.assertEqual(len(report['clients']), 2)
                 self.assertTrue(all(r['status'] == 'accepted' and 'reward' in r for r in report['clients']))
             if cls is HERAFL:
-                self.assertEqual(server.predictor.update_count, 4)
+                self.assertEqual(server.predictor.update_count, 2)
 
     def test_fedavg_logging_preserves_original_training(self):
         import random

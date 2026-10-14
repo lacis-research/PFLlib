@@ -5,6 +5,7 @@ import math
 import os
 import random
 import time
+from flcore.heterogeneity.profiles import profiles_for_algorithm
 import numpy as np
 from flcore.servers.serverbase import Server
 from flcore.clients.clientfedload import clientFedLoad
@@ -19,8 +20,8 @@ class FedLoad(Server):
     def __init__(self, args, times):
         super().__init__(args, times)
         validate_model(self.global_model)
-        if self.num_join_clients < 1:
-            raise ValueError('join_ratio must select at least one client.')
+        if not 0 < self.join_ratio <= 1:
+            raise ValueError('join_ratio must be in (0, 1].')
         if not 0 <= self.client_drop_rate < 1:
             raise ValueError('client_drop_rate must be in [0, 1).')
         if args.num_new_clients or args.dlg_eval:
@@ -35,27 +36,38 @@ class FedLoad(Server):
             raise ValueError('bandit_alpha must be nonnegative; bandit_beta must be in [0, 1].')
         if len(args.reward_weights) != 3 or any(not math.isfinite(w) or w < 0 for w in args.reward_weights) or not np.isclose(sum(args.reward_weights), 1):
             raise ValueError('reward_weights must be three nonnegative values summing to one.')
-        if not math.isfinite(args.pruning_round_timeout) or args.pruning_round_timeout <= 0:
+        if args.pruning_round_timeout is not None and (not math.isfinite(args.pruning_round_timeout) or args.pruning_round_timeout <= 0):
             raise ValueError('pruning_round_timeout must be positive and finite.')
-        self.base_round_timeout = args.pruning_round_timeout
+        self.scenario = getattr(args, 'scenario', 'iid')
+        self.base_round_timeout = args.pruning_round_timeout or (360 if self.algorithm == "HERAFL" else 180)
         self.reward_weights = args.reward_weights
-        self.bandit = self.bandit_class(args.pruning_arms, alpha=args.bandit_alpha,
-                                       beta=args.bandit_beta, random_seed=args.policy_seed + times)
+        bandit_options = dict(alpha=args.bandit_alpha, beta=args.bandit_beta,
+                              random_seed=args.policy_seed,
+                              alpha_strategy=getattr(args, 'bandit_alpha_strategy', 'binary'))
+        if self.algorithm == 'HERAFL':
+            bandit_options['capability_guidance'] = dict(
+                enabled=True, strength=0.6, straggler_penalty=0.15,
+                compute_weight=0.4, bandwidth_weight=0.25, energy_weight=0.15,
+                straggler_weight=0.2, static_bias=0.75, dynamic_penalty=0.25,
+                high_capacity_floor=0.65)
+        self.bandit = self.bandit_class(args.pruning_arms, **bandit_options)
         self.set_slow_clients()
         self.set_clients(self.client_class)
-        profiles = {}
+        profiles = profiles_for_algorithm(self.num_clients, args.policy_seed, self.algorithm == "HERAFL")
         if args.client_profiles:
             with open(args.client_profiles, encoding='utf-8') as stream:
-                profiles = json.load(stream)
-            if not isinstance(profiles, dict) or any(not isinstance(v, dict) for v in profiles.values()):
+                overrides = json.load(stream)
+            if not isinstance(overrides, dict) or any(not isinstance(v, dict) for v in overrides.values()):
                 raise ValueError('client_profiles must map client IDs to profile objects.')
-            unknown = set(profiles) - {str(c.id) for c in self.clients}
+            unknown = set(overrides) - {str(c.id) for c in self.clients}
             if unknown:
                 raise ValueError(f'Unknown client profile IDs: {sorted(unknown)}')
+            for client_id, profile in overrides.items():
+                profiles[client_id].update(profile)
         self.max_samples = max(c.train_samples for c in self.clients)
         self.initial_contexts, self.contexts = {}, {}
         for client in self.clients:
-            client.profile = profiles.get(str(client.id), {})
+            client.configure_profile(profiles.get(str(client.id), {}))
             self._validate_profile(client.profile)
             self.contexts[client.id] = client.get_context(self.max_samples)
             self.initial_contexts[client.id] = dict(self.contexts[client.id])
@@ -70,8 +82,8 @@ class FedLoad(Server):
     @staticmethod
     def _validate_profile(profile):
         positive = ('throughput_mbps', 'round_time_scale', 'energy_scale', 'compute_time_scale_per_sample')
-        normalized = ('e_cmp', 'e_up', 'e_down', 'f_i', 'cpu_capacity', 'c_r_i', 'compute_cost', 'energy_efficiency')
-        allowed = set(positive + normalized + ('e_cmp_w', 'e_up_w', 'e_down_w'))
+        normalized = ('bandwidth', 'uplink_energy', 'downlink_energy', 'e_cmp', 'e_up', 'e_down', 'f_i', 'cpu_capacity', 'c_r_i', 'compute_cost', 'energy_efficiency')
+        allowed = set(positive + normalized + ('e_cmp_w', 'e_up_w', 'e_down_w', 'bandwidth_window', 'max_throughput_mbps', 'sampled_throughput_mbps', 'cpu_frequency_ghz', 'cpu_frequency_min_ghz', 'cpu_frequency_max_ghz', 'compute_cycles_per_sample', 'compute_cycles_min', 'compute_cycles_max', 'random_seed'))
         if set(profile) - allowed:
             raise ValueError(f'Unknown profile fields: {sorted(set(profile) - allowed)}')
         for key, value in profile.items():
@@ -105,16 +117,10 @@ class FedLoad(Server):
         self.bandit.update(client.retention, reward, context)
 
     def train(self):
-        for round_index in range(self.global_rounds + 1):
+        for round_index in range(1, self.global_rounds + 1):
             self.current_round = round_index
             started = time.perf_counter()
             self.selected_clients = self.select_clients()
-            # Evaluate the complete global model using PFLlib's original metrics.
-            for client in self.clients:
-                client.model = copy.deepcopy(self.global_model)
-            if round_index % self.eval_gap == 0:
-                print(f'\n-------------Round number: {round_index}-------------')
-                self.evaluate()
             contexts = self.prepare_contexts()
             timeout = self.round_timeout(contexts)
             pending_rates = []
@@ -127,7 +133,7 @@ class FedLoad(Server):
                 assignments[client.id] = info
                 client.send_time_cost['num_rounds'] += 1
             active_count = int((1 - self.client_drop_rate) * len(self.selected_clients))
-            active_ids = {c.id for c in random.sample(self.selected_clients, active_count)}
+            active_ids = {c.id for c in self.selected_clients} if active_count == len(self.selected_clients) else {c.id for c in random.sample(self.selected_clients, active_count)}
             responses, reports = [], []
             for client in self.selected_clients:
                 client.train()
@@ -137,8 +143,10 @@ class FedLoad(Server):
                 accepted = client.id in active_ids and stats['round_time'] <= timeout
                 if self.time_select:
                     accepted = accepted and stats['round_time'] <= self.time_threthold
-                correct, samples, _ = client.test_metrics()
-                report = {'id': client.id, 'retention': client.retention,
+                correct, samples = client.local_accuracy_metrics()
+                response_context = dict(self.contexts[client.id])
+                response_context.update({k: v for k, v in contexts[client.id].items() if k.startswith('static_') or k in ('predicted_round_time', 'straggler_risk', 'straggler_threshold')})
+                report = {'context': response_context, 'id': client.id, 'retention': client.retention,
                           'status': 'accepted' if accepted else ('dropped' if client.id not in active_ids else 'timeout'),
                           'accuracy': correct / max(samples, 1), 'num_samples': client.train_samples,
                           'selection_context': contexts[client.id], 'alpha_info': assignments[client.id],
@@ -148,6 +156,7 @@ class FedLoad(Server):
                     responses.append(client)
             time_reference = float(np.mean([c.round_stats['round_time'] for c in responses])) if responses else 0.0
             updates = []
+            pending_energy = []
             for client in responses:
                 report = next(r for r in reports if r['id'] == client.id)
                 reward, components = self.calculate_reward(client.retention, report['accuracy'], client.round_stats, time_reference)
@@ -158,21 +167,35 @@ class FedLoad(Server):
                     if key.startswith('static_') or key in ('predicted_round_time', 'straggler_risk', 'straggler_threshold'):
                         learning_context[key] = value
                 self.update_policy(client, learning_context, reward)
-                self.arm_energy_history[client.retention].append(client.round_stats['energy_consumption'])
+                pending_energy.append((client.retention, client.round_stats['energy_consumption']))
                 updates.append((client.model, client.pruning_coordinates, client.train_samples))
+            for retention, energy in pending_energy:
+                self.arm_energy_history[retention].append(energy)
             self.uploaded_ids = [c.id for c in responses]
             self.global_model = aggregate_submodels(self.global_model, updates)
-            self.round_reports.append({'round': round_index, 'round_timeout': None if math.isinf(timeout) else timeout,
+            if round_index % self.eval_gap == 0:
+                for client in self.clients:
+                    client.model = copy.deepcopy(self.global_model)
+                self.evaluate()
+            self.round_reports.append({'global_accuracy': self.rs_test_acc[-1] if round_index % self.eval_gap == 0 else None, 'round': round_index, 'round_timeout': None if math.isinf(timeout) else timeout,
                                        'clients': reports})
             self.Budget.append(time.perf_counter() - started)
             print('Retentions:', {c.id: c.retention for c in self.selected_clients})
             print('Accepted updates:', len(responses), '| time cost:', self.Budget[-1])
             if self.auto_break and self.check_done(acc_lss=[self.rs_test_acc], top_cnt=self.top_cnt):
                 break
-        print('\nBest accuracy:', max(self.rs_test_acc))
-        print('Average time cost per round:', float(np.mean(self.Budget[1:] or self.Budget)))
+        print('\nBest accuracy:', max(self.rs_test_acc, default=0))
+        print('Average time cost per round:', float(np.mean(self.Budget[1:] or self.Budget)) if self.Budget else 0.0)
         self.save_results()
         self.save_global_model()
-        path = os.path.join('../results', f'{self.dataset}_{self.algorithm}_{self.goal}_{self.times}_policy.json')
-        with open(path, 'w', encoding='utf-8') as stream:
-            json.dump(self.round_reports, stream, indent=2, allow_nan=False)
+        self.save_policy_results()
+
+    def save_policy_results(self):
+        from flcore.heterogeneity.results import save_policy_results
+        save_policy_results(self)
+
+    def select_clients(self):
+        count = max(1, int(self.num_clients * self.join_ratio))
+        if self.random_join_ratio:
+            count = int(np.random.randint(count, self.num_clients + 1))
+        return random.sample(self.clients, count)

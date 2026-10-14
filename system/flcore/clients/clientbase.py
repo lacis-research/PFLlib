@@ -19,6 +19,7 @@ class Client(object):
         self.model = copy.deepcopy(args.model)
         self.algorithm = args.algorithm
         self.dataset = args.dataset
+        self.reference_training = getattr(args, "reference_training", False)
         self.device = args.device
         self.id = id  # integer
         self.save_folder_name = args.save_folder_name

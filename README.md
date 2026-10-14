@@ -477,3 +477,121 @@ Here are the relevant papers for your reference:
   url={https://openreview.net/forum?id=nO5i1XdUS0}
 }
 ```
+
+## FedLoad e HeraFL com os datasets nativos do PFLlib
+
+FedLoad e HERAFL usam os geradores existentes em `dataset/`, como
+`generate_MNIST.py`, `generate_Cifar10.py` e `generate_Cifar100.py`.
+IID/non-IID, balanceamento, distribuição de rótulos, normalização e separação
+entre treino e teste seguem as regras nativas do framework.
+
+Exemplo a partir de `PFLlib/`:
+
+```bash
+cd dataset
+python generate_MNIST.py noniid balance dir
+cd ../system
+python main.py -data MNIST -algo FedLoad -dev cpu
+python main.py -data MNIST -algo HERAFL -dev cpu
+```
+
+Para CIFAR-100:
+
+```bash
+cd dataset
+python generate_Cifar100.py noniid balance dir
+cd ../system
+python main.py -data Cifar100 -algo HERAFL -m CNN -dev cpu
+```
+
+Para executar HeraFL, FedLoad e FedAvg e gerar a comparação em PNG, use `start.sh`
+a partir de `PFLlib/`. O script ativa automaticamente o ambiente Conda `pfllib`:
+
+```bash
+./start.sh
+DATASET=cifar100 NUM_CLIENTS=20 DEVICE=cuda ./start.sh
+NUM_ROUNDS=1 LOCAL_EPOCHS=1 DEVICE=cpu ./start.sh
+ALGORITHMS=HERAFL STRAGGLER_PREDICTOR=false ./start.sh
+```
+
+O script usa MNIST non-IID por padrão, 10 rodadas e seleção de 10% dos clientes
+por rodada (2 de 20 clientes). `SELECTION_FRACTION=0.4` seleciona 40%.
+FedAvg usa `--record-resources` para incluir energia, comunicação e tempo nos
+gráficos, com os mesmos perfis de recursos dos demais métodos. Seu ciclo nativo
+permanece de 0 até `NUM_ROUNDS`; HeraFL/FedLoad executam de 1 até `NUM_ROUNDS`.
+O script verifica automaticamente `config.json` e todas as partições de treino e
+teste. Reutiliza os dados somente quando clientes, cenário IID/non-IID,
+balanceamento e partição correspondem a `NUM_CLIENTS`, `SCENARIO`, `BALANCE` e
+`PARTITION`. Se os dados estiverem ausentes, inválidos ou com configuração
+diferente, chama o gerador nativo do dataset antes de treinar; o gerador baixa
+os dados brutos quando necessário. Não é preciso definir `GENERATE_DATA`.
+`NUM_CLIENTS` omitido usa o tamanho da configuração existente ou, para um
+dataset novo, o padrão do gerador. `BALANCE=unbalanced` permite partições
+não balanceadas; `PARTITION` aceita `pat`, `dir` ou `exdir` para non-IID.
+Alterar esses parâmetros pode regenerar as partições existentes.
+`BATCH_SIZE` controla o treino, sem alterar as constantes nativas de particionamento.
+`PYTHON` permite informar o executável do ambiente. Também aceita
+`MODEL`, `BATCH_SIZE`, `LOCAL_EPOCHS`, `SELECTION_FRACTION`, `DEVICE_ID`, `GOAL`
+e `COMPARE=0`. Cada chamada cria um `GOAL` próprio para comparar somente seus
+resultados. Argumentos adicionais são repassados ao `main.py`.
+
+O modelo padrão é a CNN nativa do PFLlib. O número de clientes, o número de
+classes e o cenário são lidos do `config.json` produzido pelo gerador; parâmetros
+explícitos como `-nc`, `-ncl` e `--scenario` prevalecem. Os geradores normalmente
+configuram 20 clientes; ajuste `num_clients` no gerador para outro tamanho.
+CNN, DNN e MLR suportam a poda estruturada de FedLoad/HERAFL. A acurácia local
+usada na recompensa vem do teste de cada cliente; a avaliação agregada usa as
+partições de teste do framework, sem exigir validação ou teste global separado.
+O tamanho dos dados no contexto do bandit reflete a quantidade real de treino de
+cada cliente, normalizada pelo maior cliente.
+
+A heterogeneidade de recursos e as políticas seguem os experimentos de
+`../mininetfed_iwcmc/`: seed 42, 100 rodadas (1–100), seleção de 10%, batch 64,
+10 épocas locais, 20 braços entre 0.0625 e 1, alpha 1, beta 0.75, exploração
+binária e pesos 0.75/0.05/0.2 para acurácia/energia/tempo. FedLoad seleciona
+aleatoriamente; HeraFL estratifica por capacidade e usa o preditor online e a
+orientação por capacidade da referência. Deadlines base: 180 s e 360 s.
+Os parâmetros explícitos permitem outros experimentos.
+
+Os perfis de largura de banda, frequência, ciclos, potências e estado variável
+por rodada são gerados automaticamente com os sorteios da referência.
+`--client-profiles arquivo.json` sobrescreve campos por cliente.
+`--straggler-predictor false` desativa o preditor do HeraFL.
+`-m MininetCNN` é uma opção para as arquiteturas de referência em MNIST,
+CIFAR-10 e CINIC-10, usando as mesmas partições nativas; não é o modelo padrão.
+
+A computação é medida no processo local. Os perfis não impõem quotas de
+CPU/memória ou links de rede como os containers do Mininet. Comunicação
+contabiliza bytes dos parâmetros, sem o envelope MQTT/pickle. Rede e energia
+usam as fórmulas dos perfis. As partições e os modelos nativos também diferem
+da referência, portanto os resultados não são numericamente idênticos.
+
+Resultados seguem a organização:
+
+```text
+results/<metodo>/<data>_<experimento>_<dataset>_<cenario>_run<N>/
+  config.json
+  <dataset>_<algoritmo>_<goal>_<N>.h5
+  <dataset>_<algoritmo>_<goal>_<N>_policy.json
+  analysis/<nome-da-execucao>/csv/
+  analysis/<nome-da-execucao>/plots/*.png
+results/comparison/<comparacao>/plots/*.png
+```
+
+Para refazer a comparação da última execução completa sem repetir treinamentos:
+
+```bash
+./start.sh --compare-only
+# Ou escolha uma execução específica:
+GOAL=start-20261014-133101-241695 ./start.sh --compare-only
+```
+
+O modo automático usa um único `GOAL` presente em todos os métodos solicitados,
+sem misturar resultados de execuções diferentes. Para comparar execuções:
+
+```bash
+python tools/plot_comparison.py --dataset MNIST --goal test --algorithms FedLoad HERAFL FedAvg
+```
+
+Gráficos usam somente PNG. Os resultados antigos sob `legacy` não foram
+recalculados. Validação: `python -m unittest discover -s tests -v`.

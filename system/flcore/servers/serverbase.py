@@ -169,7 +169,8 @@ class Server(object):
         
     def save_results(self):
         algo = self.dataset + "_" + self.algorithm
-        result_path = "../results/"
+        from flcore.heterogeneity.results import result_directory
+        result_path = str(result_directory(self)) + '/'
         if not os.path.exists(result_path):
             os.makedirs(result_path)
 
@@ -180,6 +181,7 @@ class Server(object):
 
             with h5py.File(file_path, 'w') as hf:
                 hf.create_dataset('rs_test_acc', data=self.rs_test_acc)
+                hf.create_dataset('eval_rounds', data=np.arange(1, len(self.rs_test_acc) + 1) * self.eval_gap if self.algorithm in ('FedLoad', 'HERAFL') else np.arange(len(self.rs_test_acc)) * self.eval_gap)
                 hf.create_dataset('rs_test_auc', data=self.rs_test_auc)
                 hf.create_dataset('rs_train_loss', data=self.rs_train_loss)
 

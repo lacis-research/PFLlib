@@ -3,11 +3,12 @@ import copy
 import math
 import torch
 from torch import nn
+from flcore.trainmodel.mininet_models import MininetCNN
 from flcore.trainmodel.models import FedAvgCNN, DNN, Mclr_Logistic
 
 
 def validate_model(model):
-    if type(model) not in (FedAvgCNN, DNN, Mclr_Logistic):
+    if type(model) not in (FedAvgCNN, DNN, Mclr_Logistic, MininetCNN):
         raise ValueError('FedLoad/HERAFL support native CNN (FedAvgCNN), DNN and MLR models.')
 
 

@@ -39,7 +39,7 @@ def mean_accuracy(reports):
 
 
 def experiment_total(reports, metric):
-    return sum(c['round_stats'][metric] for r in reports for c in r['clients'])
+    return sum(c['round_stats'][metric] for r in reports for c in r['clients'] if c.get('status', 'accepted') == 'accepted')
 
 
 def draw_lines(data, output, filename, title, ylabel, formats):
@@ -95,7 +95,7 @@ def draw_capacity(policy_runs, output, formats):
             points = []
             for report in reports:
                 for client in report['clients']:
-                    context = client.get('selection_context', {})
+                    context = client.get('context', client.get('selection_context', {}))
                     capacity = context.get('cpu_capacity', context.get('f_i'))
                     if capacity is not None:
                         points.append((report['round'], client['id'], client['retention'], float(capacity)))
