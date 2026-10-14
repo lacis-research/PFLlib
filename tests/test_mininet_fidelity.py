@@ -33,6 +33,18 @@ class FidelityTests(unittest.TestCase):
             expected = {str(i): e['client_profile'] for i, e in enumerate(source['generate_client_profiles'](30, 42))}
             self.assertEqual(profiles_for_algorithm(30, 42, hera), expected)
 
+    def test_paper_resource_preset_matches_table_one(self):
+        profiles = profiles_for_algorithm(300, 42, True, preset='paper')
+        self.assertEqual({p['max_throughput_mbps'] for p in profiles.values()}, {75.0, 25.0, 5.0})
+        self.assertEqual({p['bandwidth_window'] for p in profiles.values()}, {10})
+        self.assertEqual({p['e_cmp_w'] for p in profiles.values()}, {7.0, 4.0, 3.0})
+        for field in ('e_up_w', 'e_down_w'):
+            self.assertEqual({p[field] for p in profiles.values()}, {2.0, 1.8, 1.7})
+        for profile in profiles.values():
+            self.assertTrue(1 <= profile['sampled_throughput_mbps'] <= profile['max_throughput_mbps'])
+            self.assertTrue(1 <= profile['cpu_frequency_ghz'] <= 2)
+            self.assertTrue(5 <= profile['compute_cycles_per_sample'] <= 30)
+
     def test_runtime_sampling_matches_reference(self):
         src = (REFERENCE / 'mininetfed/client/trainers/mnist.py').read_text()
         cls = next(n for n in ast.parse(src).body if getattr(n, 'name', None) == 'TrainerMNIST')

@@ -23,6 +23,8 @@ def save_policy_results(server):
     directory = result_directory(server)
     stem = f'{server.dataset}_{server.algorithm}_{server.goal}_{server.times}'
     metadata = dict(algorithm=server.algorithm, dataset=server.dataset, run=server.times,
+                    model=type(server.global_model).__name__, num_classes=server.num_classes,
+                    resource_preset=getattr(server.args, "resource_preset", "mininet"),
                     seed=getattr(server.args, 'policy_seed', 42), num_clients=server.num_clients,
                     global_rounds=server.global_rounds, local_epochs=server.local_epochs,
                     batch_size=server.batch_size, learning_rate=server.learning_rate,

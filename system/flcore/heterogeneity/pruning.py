@@ -4,27 +4,30 @@ import math
 import torch
 from torch import nn
 from flcore.trainmodel.mininet_models import MininetCNN
+from flcore.trainmodel.vgg import VGG11, VGG16
 from flcore.trainmodel.models import FedAvgCNN, DNN, Mclr_Logistic
 
 
 def validate_model(model):
-    if type(model) not in (FedAvgCNN, DNN, Mclr_Logistic, MininetCNN):
-        raise ValueError('FedLoad/HERAFL support native CNN (FedAvgCNN), DNN and MLR models.')
+    if type(model) not in (FedAvgCNN, DNN, Mclr_Logistic, MininetCNN, VGG11, VGG16):
+        raise ValueError('FedLoad/HERAFL support native CNN (FedAvgCNN), DNN, MLR, MininetCNN, VGG11 and VGG16 models.')
 
 
-def prune_model(model, retention):
+def prune_model(model, retention, device=None):
     """Return a physically smaller model and parameter coordinates for recovery."""
     validate_model(model)
     if not math.isfinite(retention) or not 0 < retention <= 1:
         raise ValueError('Retention must be in (0, 1].')
     result = copy.deepcopy(model)
+    if device is not None:
+        result.to(device)
     layers = [(name, layer) for name, layer in model.named_modules()
               if isinstance(layer, (nn.Conv2d, nn.Linear))]
     coordinates = {}
     previous = None
     previous_layer = None
     for index, (name, layer) in enumerate(layers):
-        weight = layer.weight.detach()
+        weight = layer.weight.detach().to(device) if device is not None else layer.weight.detach()
         outputs = torch.arange(weight.shape[0], device=weight.device)
         if index < len(layers) - 1:
             importance = weight.abs().flatten(1).sum(1)
@@ -46,7 +49,7 @@ def prune_model(model, retention):
         target.weight = nn.Parameter(weight.index_select(0, outputs).index_select(1, inputs).clone())
         coordinates[name + '.weight'] = (outputs, inputs)
         if layer.bias is not None:
-            target.bias = nn.Parameter(layer.bias.detach().index_select(0, outputs).clone())
+            target.bias = nn.Parameter(layer.bias.detach().to(weight.device).index_select(0, outputs).clone())
             coordinates[name + '.bias'] = (outputs,)
         if isinstance(target, nn.Conv2d):
             target.in_channels, target.out_channels = len(inputs), len(outputs)
@@ -73,19 +76,26 @@ def recover_model(submodel, coordinates, template):
 
 
 def aggregate_submodels(template, updates):
-    """Sample-weighted average at covered coordinates, preserving uncovered values."""
-    result = copy.deepcopy(template)
-    numerator = {n: torch.zeros_like(p) for n, p in template.named_parameters()}
-    denominator = {n: torch.zeros_like(p) for n, p in template.named_parameters()}
-    for model, coordinates, samples in updates:
-        if samples <= 0:
-            continue
-        values, masks = recover_model(model, coordinates, template)
-        for name in numerator:
-            numerator[name].add_(values[name], alpha=float(samples))
-            denominator[name].add_(masks[name], alpha=float(samples))
+    """Aggregate on CPU one layer at a time, preserving uncovered coordinates.
+
+    Only the resulting global model returns to the template device. No dense
+    per-client recovery tensors or masks are allocated on the GPU.
+    """
+    result = copy.deepcopy(template).cpu()
+    destination = next(template.parameters()).device
     with torch.no_grad():
         for name, parameter in result.named_parameters():
-            covered = denominator[name] > 0
-            parameter[covered] = numerator[name][covered] / denominator[name][covered]
-    return result
+            numerator = torch.zeros_like(parameter)
+            denominator = torch.zeros_like(parameter)
+            for model, coordinates, samples in updates:
+                if samples <= 0:
+                    continue
+                axes = tuple(axis.cpu() for axis in coordinates[name])
+                indices = (axes[0][:, None], axes[1][None, :]) if len(axes) == 2 else axes
+                values = model.get_parameter(name).detach().cpu()
+                numerator[indices] += values * float(samples)
+                denominator[indices] += float(samples)
+            covered = denominator > 0
+            parameter[covered] = numerator[covered] / denominator[covered]
+            del numerator, denominator, covered
+    return result.to(destination)

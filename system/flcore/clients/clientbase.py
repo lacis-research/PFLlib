@@ -16,7 +16,9 @@ class Client(object):
 
     def __init__(self, args, id, train_samples, test_samples, **kwargs):
         torch.manual_seed(0)
-        self.model = copy.deepcopy(args.model)
+        self.model = args.model if args.algorithm in ('FedLoad', 'HERAFL') else copy.deepcopy(args.model)
+        if args.algorithm == 'FedAvg' and getattr(args, 'record_resources', False):
+            self.model.cpu()
         self.algorithm = args.algorithm
         self.dataset = args.dataset
         self.reference_training = getattr(args, "reference_training", False)
@@ -45,7 +47,10 @@ class Client(object):
         self.send_time_cost = {'num_rounds': 0, 'total_cost': 0.0}
 
         self.loss = nn.CrossEntropyLoss()
-        self.optimizer = torch.optim.SGD(self.model.parameters(), lr=self.learning_rate)
+        if getattr(self.model, 'optimizer_kind', 'sgd') == 'adam':
+            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate, eps=1e-7)
+        else:
+            self.optimizer = torch.optim.SGD(self.model.parameters(), lr=self.learning_rate)
         self.learning_rate_scheduler = torch.optim.lr_scheduler.ExponentialLR(
             optimizer=self.optimizer, 
             gamma=args.learning_rate_decay_gamma

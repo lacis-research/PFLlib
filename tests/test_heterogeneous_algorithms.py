@@ -183,6 +183,38 @@ class NativeServerTests(unittest.TestCase):
         self.assertEqual(servers[0].rs_test_acc, servers[1].rs_test_acc)
         self.assertEqual(len(servers[1].round_reports), 2)
 
+    def test_profiled_fedavg_preserves_adam_state_across_rounds(self):
+        import random
+        import numpy as np
+        from flcore.servers.serveravg import FedAvg
+        from flcore.servers.serverprofiledavg import ProfiledFedAvg
+        servers = []
+        for cls in (FedAvg, ProfiledFedAvg):
+            torch.manual_seed(23)
+            np.random.seed(12)
+            random.seed(13)
+            model = DNN(input_dim=4, mid_dim=8, num_classes=3)
+            model.optimizer_kind = 'adam'
+            server, _ = self.run_server(cls, self.make_args(model=model, algorithm='FedAvg', global_rounds=3))
+            servers.append(server)
+        for original, profiled in zip(servers[0].global_model.parameters(), servers[1].global_model.parameters()):
+            torch.testing.assert_close(original, profiled, rtol=0, atol=0)
+        for original, profiled in zip(servers[0].clients, servers[1].clients):
+            for first, second in zip(original.optimizer.state.values(), profiled.optimizer.state.values()):
+                for key in first:
+                    torch.testing.assert_close(first[key], second[key], rtol=0, atol=0)
+            self.assertTrue(all(p.device.type == 'cpu' for p in profiled.model.parameters()))
+
+    def test_partial_servers_share_evaluation_model_and_release_round_optimizers(self):
+        from flcore.servers.serverfedload import FedLoad
+        from flcore.servers.serverherafl import HERAFL
+        for cls in (FedLoad, HERAFL):
+            server, _ = self.run_server(cls, self.make_args(algorithm=cls.__name__, global_rounds=5))
+            self.assertEqual(len(server.round_reports), 5)
+            self.assertTrue(all(client.model is server.global_model for client in server.clients))
+            self.assertTrue(all(client.optimizer is None for client in server.clients))
+            self.assertTrue(all(client.learning_rate_scheduler is None for client in server.clients))
+
     def test_no_responses_preserves_global_and_policy(self):
         from flcore.servers.serverfedload import FedLoad
         for options in (dict(pruning_round_timeout=1e-12), dict(client_drop_rate=0.99)):

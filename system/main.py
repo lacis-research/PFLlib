@@ -9,6 +9,7 @@ import sys
 import json
 from pathlib import Path
 from flcore.trainmodel.mininet_models import MininetCNN
+from flcore.trainmodel.vgg import VGG11, VGG16
 import warnings
 import numpy as np
 import torchvision
@@ -92,7 +93,9 @@ def run(args):
             np.random.seed(args.policy_seed + i)
             random.seed(args.policy_seed + i)
         # Generate args.model
-        if model_str == "MininetCNN":
+        if model_str in ('VGG11', 'VGG16'):
+            args.model = {'VGG11': VGG11, 'VGG16': VGG16}[model_str](args.num_classes).to(args.device)
+        elif model_str == "MininetCNN":
             config = Path('../dataset') / args.dataset / 'config.json'
             dataset_name = json.loads(config.read_text()).get('dataset', args.dataset) if config.exists() else args.dataset
             args.model = MininetCNN(dataset_name, args.num_classes).to(args.device)
@@ -200,9 +203,10 @@ def run(args):
 
         # select algorithm
         if args.algorithm == "FedAvg":
-            args.head = copy.deepcopy(args.model.fc)
-            args.model.fc = nn.Identity()
-            args.model = BaseHeadSplit(args.model, args.head)
+            if hasattr(args.model, 'fc'):
+                args.head = copy.deepcopy(args.model.fc)
+                args.model.fc = nn.Identity()
+                args.model = BaseHeadSplit(args.model, args.head)
             server = ProfiledFedAvg(args, i) if args.record_resources else FedAvg(args, i)
 
         elif args.algorithm == "FedLoad":
@@ -527,6 +531,7 @@ if __name__ == "__main__":
                         help='Log FedAvg client accuracy and estimated resources alongside HDF5 results.')
     parser.add_argument('--bandit-alpha', type=float, default=1.0)
     parser.add_argument('--bandit-beta', type=float, default=0.75)
+    parser.add_argument('--resource-preset', choices=['mininet', 'paper'], default='mininet')
     parser.add_argument('--policy-seed', type=int, default=42)
     parser.add_argument('--reward-weights', type=float, nargs=3, default=[0.75, 0.05, 0.2],
                         metavar=('ACCURACY', 'ENERGY', 'TIME'))
@@ -539,6 +544,7 @@ if __name__ == "__main__":
     parser.add_argument('--scenario', choices=['iid', 'non-iid'], default='iid')
     parser.add_argument('--reference-training', action='store_true', help='Use the Mininet optimizer with MininetCNN.')
     args = parser.parse_args()
+    args.model = {'vgg11': 'VGG11', 'vgg16': 'VGG16'}.get(args.model.lower(), args.model)
     args.straggler_predictor = args.straggler_predictor == 'true'
     if args.model == 'MininetCNN':
         args.reference_training = True
@@ -564,6 +570,9 @@ if __name__ == "__main__":
             config = Path('../dataset') / args.dataset / 'config.json'
             dataset_name = json.loads(config.read_text()).get('dataset', args.dataset) if config.exists() else args.dataset
             args.local_learning_rate = 0.001 if dataset_name.lower().replace('-', '') in ('cifar10', 'cinic10') else 0.01
+
+    if args.model in ('VGG11', 'VGG16') and not any(a.split('=')[0] in ('-lr', '--local_learning_rate') for a in sys.argv[1:]):
+        args.local_learning_rate = 0.001
 
     os.environ["CUDA_VISIBLE_DEVICES"] = args.device_id
 

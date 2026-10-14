@@ -53,7 +53,8 @@ class FedLoad(Server):
         self.bandit = self.bandit_class(args.pruning_arms, **bandit_options)
         self.set_slow_clients()
         self.set_clients(self.client_class)
-        profiles = profiles_for_algorithm(self.num_clients, args.policy_seed, self.algorithm == "HERAFL")
+        profiles = profiles_for_algorithm(self.num_clients, args.policy_seed, self.algorithm == "HERAFL",
+                                          preset=getattr(args, "resource_preset", "mininet"))
         if args.client_profiles:
             with open(args.client_profiles, encoding='utf-8') as stream:
                 overrides = json.load(stream)
@@ -67,6 +68,7 @@ class FedLoad(Server):
         self.max_samples = max(c.train_samples for c in self.clients)
         self.initial_contexts, self.contexts = {}, {}
         for client in self.clients:
+            client.model = self.global_model
             client.configure_profile(profiles.get(str(client.id), {}))
             self._validate_profile(client.profile)
             self.contexts[client.id] = client.get_context(self.max_samples)
@@ -119,6 +121,7 @@ class FedLoad(Server):
     def train(self):
         for round_index in range(1, self.global_rounds + 1):
             self.current_round = round_index
+            print(f'\n-------------Round number: {round_index}-------------', flush=True)
             started = time.perf_counter()
             self.selected_clients = self.select_clients()
             contexts = self.prepare_contexts()
@@ -128,10 +131,12 @@ class FedLoad(Server):
             for client in self.selected_clients:
                 retention, info = self.bandit.choose_pruning_rate(contexts[client.id], pending_rates)
                 pending_rates.append(retention)
-                submodel, coordinates = prune_model(self.global_model, retention)
+                submodel, coordinates = prune_model(self.global_model, retention, device='cpu')
                 client.set_submodel(submodel, coordinates, retention)
                 assignments[client.id] = info
                 client.send_time_cost['num_rounds'] += 1
+            # Do not retain the last assignment through the following evaluation.
+            del submodel, coordinates
             active_count = int((1 - self.client_drop_rate) * len(self.selected_clients))
             active_ids = {c.id for c in self.selected_clients} if active_count == len(self.selected_clients) else {c.id for c in random.sample(self.selected_clients, active_count)}
             responses, reports = [], []
@@ -151,6 +156,7 @@ class FedLoad(Server):
                           'accuracy': correct / max(samples, 1), 'num_samples': client.train_samples,
                           'selection_context': contexts[client.id], 'alpha_info': assignments[client.id],
                           'round_stats': dict(stats)}
+                client.offload_submodel()
                 reports.append(report)
                 if accepted:
                     responses.append(client)
@@ -175,7 +181,7 @@ class FedLoad(Server):
             self.global_model = aggregate_submodels(self.global_model, updates)
             if round_index % self.eval_gap == 0:
                 for client in self.clients:
-                    client.model = copy.deepcopy(self.global_model)
+                    client.model = self.global_model
                 self.evaluate()
             self.round_reports.append({'global_accuracy': self.rs_test_acc[-1] if round_index % self.eval_gap == 0 else None, 'round': round_index, 'round_timeout': None if math.isinf(timeout) else timeout,
                                        'clients': reports})

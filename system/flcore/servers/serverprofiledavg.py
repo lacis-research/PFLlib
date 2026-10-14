@@ -15,7 +15,7 @@ class ProfiledFedAvg(FedAvg):
         super().__init__(args, times)
         self.round_reports = []
         from flcore.heterogeneity.profiles import profiles_for_algorithm
-        profiles = profiles_for_algorithm(self.num_clients, args.policy_seed)
+        profiles = profiles_for_algorithm(self.num_clients, args.policy_seed, preset=getattr(args, "resource_preset", "mininet"))
         if args.client_profiles:
             with open(args.client_profiles, encoding='utf-8') as stream:
                 profiles = json.load(stream)
@@ -29,6 +29,22 @@ class ProfiledFedAvg(FedAvg):
             client.configure_profile(profiles.get(str(client.id), {}))
             FedLoad._validate_profile(client.profile)
         print('Resource logging: compute time measured; network and energy estimated from profiles.')
+
+    def evaluate(self, *args, **kwargs):
+        # send_models distributes the same global weights to every client.
+        # Evaluate that single model while preserving each CPU optimizer/model.
+        models = [client.model for client in self.clients]
+        try:
+            for client in self.clients:
+                client.model = self.global_model
+            return super().evaluate(*args, **kwargs)
+        finally:
+            for client, model in zip(self.clients, models):
+                client.model = model
+
+    def aggregate_parameters(self):
+        super().aggregate_parameters()
+        self.global_model.to(self.device)
 
     def send_models(self):
         self.selection_contexts = {c.id: c.get_context(self.max_samples) for c in self.selected_clients}

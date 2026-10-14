@@ -17,6 +17,9 @@ class clientFedLoad(Client):
         self.round_stats = {}
         self.pruning_coordinates = None
         self.retention = 1.0
+        if self.algorithm in ('FedLoad', 'HERAFL'):
+            self.optimizer = None
+            self.learning_rate_scheduler = None
 
     def set_submodel(self, model, coordinates, retention):
         self.model = model
@@ -26,7 +29,9 @@ class clientFedLoad(Client):
         learning_rate = self.learning_rate
         if self.learning_rate_decay:
             learning_rate *= self.decay_gamma ** self.train_time_cost['num_rounds']
-        if getattr(self, 'reference_training', False):
+        if getattr(self.model, 'optimizer_kind', 'sgd') == 'adam':
+            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate, eps=1e-7)
+        elif getattr(self, 'reference_training', False):
             if self.model.augment:
                 self.optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate, eps=1e-7)
             else:
@@ -35,11 +40,20 @@ class clientFedLoad(Client):
         else:
             self.optimizer = torch.optim.SGD(self.model.parameters(), lr=learning_rate)
 
+    def offload_submodel(self):
+        """Release round-local optimizer state and keep received updates on CPU."""
+        self.optimizer = None
+        self.learning_rate_scheduler = None
+        self.model.cpu()
+        self.pruning_coordinates = {name: tuple(axis.cpu() for axis in axes)
+                                    for name, axes in self.pruning_coordinates.items()}
+
     def _synchronize(self):
         if str(self.device).startswith('cuda'):
             torch.cuda.synchronize(self.device)
 
     def train(self):
+        self.model.to(self.device)
         self.sample_system_state()
         trainloader = DataLoader(self.load_train_data().dataset, batch_size=self.batch_size, shuffle=True, drop_last=False)
         if not len(trainloader):

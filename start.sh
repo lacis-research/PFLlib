@@ -26,13 +26,13 @@ conda activate pfllib
 # Usa o Python do ambiente ativado, salvo sobrescrita explícita.
 PYTHON="${PYTHON:-python}"
 DATASET="${DATASET:-cifar10}"
-SCENARIO="${SCENARIO:-non-iid}"
-NUM_ROUNDS="${NUM_ROUNDS:-100}"
-NUM_CLIENTS="${NUM_CLIENTS:-20}" # vazio: usa config.json existente ou o padrão do gerador
-SELECTION_FRACTION="${SELECTION_FRACTION:-0.3}"
-LOCAL_EPOCHS="${LOCAL_EPOCHS:-10}"
+SCENARIO="${SCENARIO:-iid}"
+NUM_ROUNDS="${NUM_ROUNDS:-50}"
+NUM_CLIENTS="${NUM_CLIENTS:-30}" # vazio: usa config.json existente ou o padrão do gerador
+SELECTION_FRACTION="${SELECTION_FRACTION:-0.2}"
+LOCAL_EPOCHS="${LOCAL_EPOCHS:-5}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
-MODEL="${MODEL:-CNN}"
+MODEL="${MODEL:-}" # selecionado por dataset abaixo
 DEVICE="${DEVICE:-cuda}" # main.py usa CPU se CUDA não estiver disponível
 DEVICE_ID="${DEVICE_ID:-0}"
 GOAL="${GOAL:-start-$(date +%Y%m%d-%H%M%S)-$$}"
@@ -41,13 +41,32 @@ STRAGGLER_PREDICTOR="${STRAGGLER_PREDICTOR:-true}"
 BALANCE="${BALANCE:-balance}"
 PARTITION="${PARTITION:-dir}"
 COMPARE="${COMPARE:-1}"
+# Tabela I e seção IV do artigo FedLoad.
+BANDIT_ALPHA="${BANDIT_ALPHA:-0.5}"
+BANDIT_BETA="${BANDIT_BETA:-0.75}"
+PRUNING_ARMS="${PRUNING_ARMS:-0.5 0.5555555555555556 0.6111111111111112 0.6666666666666666 0.7222222222222222 0.7777777777777778 0.8333333333333333 0.8888888888888888 0.9444444444444444 1.0}"
+REWARD_WEIGHTS="${REWARD_WEIGHTS:-0.6 0.1 0.3}"
+RESOURCE_PRESET="${RESOURCE_PRESET:-paper}"
+# Valores não informados no artigo: defaults da implementação local.
+LEARNING_RATE="${LEARNING_RATE:-0.001}"
+POLICY_SEED="${POLICY_SEED:-42}"
+read -r -a pruning_arms <<< "$PRUNING_ARMS"
+read -r -a reward_weights <<< "$REWARD_WEIGHTS"
 
 case "${DATASET,,}" in
     mnist) DATASET=MNIST ;;
     cifar10|cifar-10) DATASET=Cifar10 ;;
     cifar100|cifar-100) DATASET=Cifar100 ;;
+    cinic10|cinic-10) DATASET=Cinic10 ;;
     fashionmnist|fashion-mnist) DATASET=FashionMNIST ;;
 esac
+if [[ -z "$MODEL" ]]; then
+    case "$DATASET" in
+        Cifar10) MODEL=VGG11 ;;
+        Cinic10|Cifar100) MODEL=VGG16 ;;
+        *) MODEL=CNN ;;
+    esac
+fi
 case "$SCENARIO" in
     iid|idd) SCENARIO=iid ;;
     non-iid|non_iid|noniid) SCENARIO=non-iid ;;
@@ -92,6 +111,11 @@ common_args=(
     -data "$DATASET" -m "$MODEL" -gr "$NUM_ROUNDS"
     -nc "$dataset_clients" -ncl "$dataset_classes"
     -jr "$SELECTION_FRACTION" -ls "$LOCAL_EPOCHS" -lbs "$BATCH_SIZE"
+    -lr "$LEARNING_RATE" --policy-seed "$POLICY_SEED"
+    --resource-preset "$RESOURCE_PRESET"
+    --pruning-arms "${pruning_arms[@]}"
+    --bandit-alpha "$BANDIT_ALPHA" --bandit-beta "$BANDIT_BETA"
+    --reward-weights "${reward_weights[@]}"
     -dev "$DEVICE" -did "$DEVICE_ID" -go "$GOAL" --scenario "$SCENARIO"
 )
 cd "$SCRIPT_DIR/system"

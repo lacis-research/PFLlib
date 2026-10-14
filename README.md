@@ -514,8 +514,24 @@ NUM_ROUNDS=1 LOCAL_EPOCHS=1 DEVICE=cpu ./start.sh
 ALGORITHMS=HERAFL STRAGGLER_PREDICTOR=false ./start.sh
 ```
 
-O script usa MNIST non-IID por padrão, 10 rodadas e seleção de 10% dos clientes
-por rodada (2 de 20 clientes). `SELECTION_FRACTION=0.4` seleciona 40%.
+O `start.sh` usa o setup do artigo FedLoad: CIFAR-10/VGG11, IID, 30 clientes,
+6 participantes por rodada (`SELECTION_FRACTION=0.2`), 5 épocas locais como
+adaptação das 5 iterações locais do artigo, 10 braços `linspace(0.5, 1, 10)`,
+alpha 0.5, beta 0.75, janela de largura de banda 10 e pesos 0.6/0.1/0.3.
+O preset `paper` usa capacidades de rede em {75, 25, 5} Mbps, throughput
+uniforme entre 1 e a capacidade, frequência entre 1 e 2, ciclos por amostra
+entre 5 e 30 e potências computacionais {7, 4, 3} W e de transmissão
+{2, 1.8, 1.7} W. As potências são sorteadas independentemente.
+As 100 rodadas, batch 64, learning rate 0.001 e seed 42 são escolhas da
+implementação; esses valores não são especificados no setup do artigo.
+CINIC-10 seleciona VGG16, mas não possui gerador nativo disponível neste PFLlib;
+CIFAR-100/VGG16 é uma extensão, sem equivalência com o dataset do artigo.
+HeraFL permanece na comparação como extensão ao estudo original, que não o avalia.
+`MODEL`, `SCENARIO`, `NUM_CLIENTS`, `SELECTION_FRACTION`, `LOCAL_EPOCHS`,
+`PRUNING_ARMS`, `BANDIT_ALPHA`, `BANDIT_BETA`, `REWARD_WEIGHTS`,
+`LEARNING_RATE`, `POLICY_SEED` e `RESOURCE_PRESET` permitem sobrescritas.
+O preset `mininet` preserva os perfis anteriores. Os defaults de `main.py`
+permanecem independentes; o `start.sh` passa explicitamente o setup do artigo.
 FedAvg usa `--record-resources` para incluir energia, comunicação e tempo nos
 gráficos, com os mesmos perfis de recursos dos demais métodos. Seu ciclo nativo
 permanece de 0 até `NUM_ROUNDS`; HeraFL/FedLoad executam de 1 até `NUM_ROUNDS`.
@@ -535,17 +551,43 @@ Alterar esses parâmetros pode regenerar as partições existentes.
 e `COMPARE=0`. Cada chamada cria um `GOAL` próprio para comparar somente seus
 resultados. Argumentos adicionais são repassados ao `main.py`.
 
-O modelo padrão é a CNN nativa do PFLlib. O número de clientes, o número de
+No `main.py`, o modelo padrão é a CNN nativa do PFLlib. O número de clientes, o número de
 classes e o cenário são lidos do `config.json` produzido pelo gerador; parâmetros
 explícitos como `-nc`, `-ncl` e `--scenario` prevalecem. Os geradores normalmente
 configuram 20 clientes; ajuste `num_clients` no gerador para outro tamanho.
-CNN, DNN e MLR suportam a poda estruturada de FedLoad/HERAFL. A acurácia local
+CNN, DNN, MLR, VGG11 e VGG16 suportam a poda estruturada de FedLoad/HERAFL. A acurácia local
 usada na recompensa vem do teste de cada cliente; a avaliação agregada usa as
 partições de teste do framework, sem exigir validação ou teste global separado.
 O tamanho dos dados no contexto do bandit reflete a quantidade real de treino de
 cada cliente, normalizada pelo maior cliente.
 
-A heterogeneidade de recursos e as políticas seguem os experimentos de
+### VGG11 e VGG16 do artigo FedLoad
+
+As opções `MODEL=VGG11` e `MODEL=VGG16` funcionam com HeraFL, FedLoad e FedAvg:
+
+```bash
+DATASET=cifar10 MODEL=VGG11 ./start.sh
+DATASET=cifar100 MODEL=VGG16 ./start.sh
+# Diretamente pelo main.py:
+python main.py -data Cifar10 -m VGG11 -algo FedLoad
+```
+
+O artigo usa VGG11 no CIFAR-10 e VGG16 no CINIC-10. O exemplo com CIFAR-100
+é uma extensão para um dataset nativo do PFLlib; a saída acompanha seu número
+de classes. Ambas recebem imagens RGB 32×32. A adaptação segue o MininetFed:
+VGG11 possui 8 convoluções e VGG16, 13; convoluções 3×3 com padding 1 e ReLU,
+5 MaxPools 2×2, Flatten de 512 elementos, duas camadas densas de 4096 com ReLU
+e dropout 0.5, e uma camada final com logits para todas as classes. Sem BatchNorm.
+
+O treino usa Adam (learning rate padrão 0.001, sobrescrito por `-lr`), espelhamento
+horizontal aleatório e translação aleatória de até 10%, somente durante treino.
+O artigo não especifica a learning rate; 0.001 e o cabeçalho adaptado a 32×32
+seguem a implementação local de referência. FedAvg treina o modelo completo;
+HeraFL/FedLoad podam todas as camadas ocultas, preservando as classes de saída.
+No `start.sh`, o modelo é escolhido pelo dataset, salvo sobrescrita por `MODEL`.
+
+Ao chamar `main.py` sem os parâmetros do setup do artigo, os defaults de
+heterogeneidade de recursos e das políticas seguem os experimentos de
 `../mininetfed_iwcmc/`: seed 42, 100 rodadas (1–100), seleção de 10%, batch 64,
 10 épocas locais, 20 braços entre 0.0625 e 1, alpha 1, beta 0.75, exploração
 binária e pesos 0.75/0.05/0.2 para acurácia/energia/tempo. FedLoad seleciona
@@ -565,6 +607,13 @@ CPU/memória ou links de rede como os containers do Mininet. Comunicação
 contabiliza bytes dos parâmetros, sem o envelope MQTT/pickle. Rede e energia
 usam as fórmulas dos perfis. As partições e os modelos nativos também diferem
 da referência, portanto os resultados não são numericamente idênticos.
+
+Para limitar o consumo de memória da GPU com VGG, os clientes aguardam na CPU
+e somente o cliente em treino ocupa a GPU. HeraFL/FedLoad descartam o estado do
+otimizador ao terminar cada submodelo (ele já era recriado por rodada), agregam
+as coordenadas na CPU por camada e avaliam uma única cópia do modelo global.
+O FedAvg com registro de recursos também guarda seus modelos e estados do Adam
+na CPU entre treinos, preservando esses estados entre rodadas.
 
 Resultados seguem a organização:
 

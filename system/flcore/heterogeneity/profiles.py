@@ -12,9 +12,9 @@ def normalize(values, invert=False):
         normalized.append(1.0 - ratio if invert else ratio)
     return normalized
 
-def generate_client_profiles(num_clients, seed):
+def generate_client_profiles(num_clients, seed, paper=False):
     rng = np.random.default_rng(seed)
-    max_throughput_choices = np.array([75.0, 50.0, 25.0, 10.0, 5.0], dtype=np.float64)
+    max_throughput_choices = np.array([75.0, 25.0, 5.0] if paper else [75.0, 50.0, 25.0, 10.0, 5.0], dtype=np.float64)
     max_throughputs = rng.choice(max_throughput_choices, size=num_clients, replace=True)
     sampled_throughputs = np.array(
         [rng.uniform(1.0, max_throughput) for max_throughput in max_throughputs],
@@ -31,6 +31,12 @@ def generate_client_profiles(num_clients, seed):
         size=num_clients,
         replace=True,
     )
+
+    if paper:
+        cmp = rng.choice([7.0, 4.0, 3.0], size=num_clients)
+        up = rng.choice([2.0, 1.8, 1.7], size=num_clients)
+        down = rng.choice([2.0, 1.8, 1.7], size=num_clients)
+        energy_modes = [dict(e_cmp=c, e_up=u, e_down=d) for c, u, d in zip(cmp, up, down)]
 
     bandwidth_capacity = normalize(sampled_throughputs.tolist())
     cpu_capacity = normalize(cpu_frequencies.tolist())
@@ -69,7 +75,7 @@ def generate_client_profiles(num_clients, seed):
                 "e_down_w": float(e_down_values[idx]),
                 "f_i": float(cpu_capacity[idx]),
                 "c_r_i": float(compute_cost[idx]),
-                "bandwidth_window": 3,
+                "bandwidth_window": 10 if paper else 3,
                 "energy_scale": 10.0,
                 "round_time_scale": 120.0,
                 "max_throughput_mbps": float(max_throughputs[idx]),
@@ -86,8 +92,8 @@ def generate_client_profiles(num_clients, seed):
         profiles.append(profile)
     return profiles
 
-def profiles_for_algorithm(num_clients, seed, hera=False):
-    profiles = generate_client_profiles(num_clients, seed)
+def profiles_for_algorithm(num_clients, seed, hera=False, preset="mininet"):
+    profiles = generate_client_profiles(num_clients, seed, paper=preset == "paper")
     result = {}
     for i, entry in enumerate(profiles):
         profile = dict(entry["client_profile"])
