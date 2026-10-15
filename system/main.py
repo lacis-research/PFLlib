@@ -581,7 +581,9 @@ if __name__ == "__main__":
             args.local_learning_rate = 0.001 if dataset_name.lower().replace('-', '') in ('cifar10', 'cinic10') else 0.01
 
     if args.model in ('VGG11', 'VGG16') and not any(a.split('=')[0] in ('-lr', '--local_learning_rate') for a in sys.argv[1:]):
-        args.local_learning_rate = 0.001
+        # The full-width VGG collapses with Adam at 1e-3 in the shared protocol.
+        # Use the same stable default for all three algorithms.
+        args.local_learning_rate = 0.0001
 
     os.environ["CUDA_VISIBLE_DEVICES"] = args.device_id
 

@@ -211,6 +211,22 @@ class NativeServerTests(unittest.TestCase):
             if cls is HERAFL:
                 self.assertEqual(server.predictor.update_count, 4)
 
+    def test_aligned_fedavg_saved_rounds_match_policy_reports(self):
+        import tempfile
+        import h5py
+        from flcore.servers.serverfedload import ComparisonFedAvg
+        server, _ = self.run_server(ComparisonFedAvg, self.make_args(
+            algorithm='FedAvg', aligned_comparison=True, wait_for_all=True,
+            global_rounds=4, eval_gap=2))
+        with tempfile.TemporaryDirectory() as directory:
+            with patch('flcore.heterogeneity.results.result_directory', return_value=Path(directory)):
+                server.save_results()
+            with h5py.File(next(Path(directory).glob('*.h5'))) as saved:
+                self.assertEqual(saved['eval_rounds'][:].tolist(),
+                                 [r['round'] for r in server.round_reports
+                                  if r['global_accuracy'] is not None])
+                self.assertEqual(saved['rs_test_acc'][:].tolist(), server.rs_test_acc)
+
     def test_fedavg_logging_preserves_original_training(self):
         import random
         import numpy as np

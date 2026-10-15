@@ -522,7 +522,7 @@ O preset `paper` usa capacidades de rede em {75, 25, 5} Mbps, throughput
 uniforme entre 1 e a capacidade, frequência entre 1 e 2, ciclos por amostra
 entre 5 e 30 e potências computacionais {7, 4, 3} W e de transmissão
 {2, 1.8, 1.7} W. As potências são sorteadas independentemente.
-As 50 rodadas, batch 64, learning rate 0.001 e seed 42 são escolhas da
+As 200 rodadas, batch 64, learning rate 0.0001 para VGG e seed 42 são escolhas da
 implementação; esses valores não são especificados no setup do artigo.
 CINIC-10 seleciona VGG16, mas não possui gerador nativo disponível neste PFLlib;
 CIFAR-100/VGG16 é uma extensão, sem equivalência com o dataset do artigo.
@@ -595,10 +595,13 @@ VGG11 possui 8 convoluções e VGG16, 13; convoluções 3×3 com padding 1 e ReL
 5 MaxPools 2×2, Flatten de 512 elementos, duas camadas densas de 4096 com ReLU
 e dropout 0.5, e uma camada final com logits para todas as classes. Sem BatchNorm.
 
-O treino usa Adam (learning rate padrão 0.001, sobrescrito por `-lr`), espelhamento
+O treino usa Adam (learning rate padrão 0.0001 para VGG, sobrescrito por `-lr`), espelhamento
 horizontal aleatório e translação aleatória de até 10%, somente durante treino.
-O artigo não especifica a learning rate; 0.001 e o cabeçalho adaptado a 32×32
-seguem a implementação local de referência. FedAvg treina o modelo completo;
+O artigo não especifica a learning rate. O padrão anterior de 0.001 causou
+colapso das ativações do FedAvg com VGG11 no protocolo alinhado; 0.0001 é o
+novo padrão compartilhado entre os três métodos. `LEARNING_RATE` permite
+sobrescrevê-lo no `start.sh`; os demais modelos mantêm 0.001 nesse script.
+O cabeçalho adaptado a 32×32 segue a implementação local de referência. FedAvg treina o modelo completo;
 HeraFL/FedLoad podam todas as camadas ocultas, preservando as classes de saída.
 No `start.sh`, o modelo é escolhido pelo dataset, salvo sobrescrita por `MODEL`.
 

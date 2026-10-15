@@ -27,7 +27,7 @@ conda activate pfllib
 PYTHON="${PYTHON:-python}"
 DATASET="${DATASET:-cifar10}"
 SCENARIO="${SCENARIO:-iid}"
-NUM_ROUNDS="${NUM_ROUNDS:-200}"
+NUM_ROUNDS="${NUM_ROUNDS:-300}"
 NUM_CLIENTS="${NUM_CLIENTS:-30}" # vazio: usa config.json existente ou o padrão do gerador
 SELECTION_FRACTION="${SELECTION_FRACTION:-0.2}"
 LOCAL_EPOCHS="${LOCAL_EPOCHS:-5}"
@@ -48,7 +48,7 @@ PRUNING_ARMS="${PRUNING_ARMS:-0.5 0.5555555555555556 0.6111111111111112 0.666666
 REWARD_WEIGHTS="${REWARD_WEIGHTS:-0.6 0.1 0.3}"
 RESOURCE_PRESET="${RESOURCE_PRESET:-paper}"
 # Valores não informados no artigo: defaults da implementação local.
-LEARNING_RATE="${LEARNING_RATE:-0.001}"
+LEARNING_RATE="${LEARNING_RATE:-}" # padrão escolhido pelo modelo, compartilhado entre métodos
 POLICY_SEED="${POLICY_SEED:-42}"
 ROUND_TIMEOUT="${ROUND_TIMEOUT:-180}"
 WAIT_FOR_ALL="${WAIT_FOR_ALL:-1}" # 1: agrega todas as atualizações selecionadas
@@ -67,6 +67,12 @@ if [[ -z "$MODEL" ]]; then
         Cifar10) MODEL=VGG11 ;;
         Cinic10|Cifar100) MODEL=VGG16 ;;
         *) MODEL=CNN ;;
+    esac
+fi
+if [[ -z "$LEARNING_RATE" ]]; then
+    case "${MODEL,,}" in
+        vgg11|vgg16) LEARNING_RATE=0.0001 ;;
+        *) LEARNING_RATE=0.001 ;;
     esac
 fi
 case "$SCENARIO" in
@@ -109,7 +115,7 @@ fi
 dataset_config="$("$PYTHON" tools/prepare_dataset.py "${prepare_args[@]}")"
 read -r dataset_clients dataset_classes DATASET <<< "$dataset_config"
 
-common_args=(
+common_args=( 
     -data "$DATASET" -m "$MODEL" -gr "$NUM_ROUNDS"
     -nc "$dataset_clients" -ncl "$dataset_classes"
     -jr "$SELECTION_FRACTION" -ls "$LOCAL_EPOCHS" -lbs "$BATCH_SIZE"

@@ -181,7 +181,7 @@ class Server(object):
 
             with h5py.File(file_path, 'w') as hf:
                 hf.create_dataset('rs_test_acc', data=self.rs_test_acc)
-                hf.create_dataset('eval_rounds', data=np.arange(1, len(self.rs_test_acc) + 1) * self.eval_gap if self.algorithm in ('FedLoad', 'HERAFL') else np.arange(len(self.rs_test_acc)) * self.eval_gap)
+                hf.create_dataset('eval_rounds', data=np.arange(1, len(self.rs_test_acc) + 1) * self.eval_gap if getattr(self, 'aligned_comparison', False) or self.algorithm in ('FedLoad', 'HERAFL') else np.arange(len(self.rs_test_acc)) * self.eval_gap)
                 hf.create_dataset('rs_test_auc', data=self.rs_test_auc)
                 hf.create_dataset('rs_train_loss', data=self.rs_train_loss)
 
