@@ -663,3 +663,29 @@ python tools/plot_comparison.py --dataset MNIST --goal test --algorithms FedLoad
 
 Gráficos usam somente PNG. Os resultados antigos sob `legacy` não foram
 recalculados. Validação: `python -m unittest discover -s tests -v`.
+
+
+### HERAFL: piso de retenção e contexto consistente
+
+O HERAFL restringe os braços pela capacidade computacional estática
+`(static_cpu_capacity + 1 - static_compute_cost) / 2`, calculada a partir do
+contexto inicial, antes do treinamento. Clientes com capacidade >= 0,70 usam
+retenção >= 0,85; clientes com capacidade >= 0,40 usam retenção >= 0,70.
+Os demais mantêm todos os braços disponíveis. A retenção representa a fração
+preservada dos canais/neurônios ocultos, não a fração total de parâmetros.
+
+Os limites podem ser ajustados sem alterar FedLoad/FedAvg:
+
+```bash
+./start.sh --hera-retention-floors 0.70 0.85 --hera-capacity-thresholds 0.40 0.70
+```
+
+A política escolhe somente braços configurados que atendem ao piso. Se o maior
+braço estiver abaixo do piso, utiliza esse braço e registra
+`retention_floor_satisfied=false` em `alpha_info` no relatório da política.
+Para desativar apenas o piso em uma ablação, use `--hera-retention-floors 0 0`.
+
+A atualização do LinUCB e do preditor do HERAFL recebe o mesmo contexto usado na
+escolha. As métricas observadas continuam fornecendo a recompensa e o alvo do
+preditor. Os relatórios JSON preservam `selection_context`, `learning_context`
+e o contexto observado; o `config.json` salva pisos e limiares utilizados.

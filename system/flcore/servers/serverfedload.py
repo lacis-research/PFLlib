@@ -57,6 +57,8 @@ class FedLoad(Server):
                 compute_weight=0.4, bandwidth_weight=0.25, energy_weight=0.15,
                 straggler_weight=0.2, static_bias=0.75, dynamic_penalty=0.25,
                 high_capacity_floor=0.65)
+            bandit_options['retention_floors'] = getattr(args, 'hera_retention_floors', (0.70, 0.85))
+            bandit_options['capacity_thresholds'] = getattr(args, 'hera_capacity_thresholds', (0.40, 0.70))
         self.bandit = self.bandit_class(args.pruning_arms, **bandit_options)
         self.set_slow_clients()
         self.set_clients(self.client_class)
@@ -180,11 +182,14 @@ class FedLoad(Server):
                 report = next(r for r in reports if r['id'] == client.id)
                 reward, components = self.calculate_reward(client.retention, report['accuracy'], client.round_stats, time_reference)
                 report.update(reward=reward, reward_components=components)
-                # Source controllers learn from the response context, enriched for HERAFL.
+                # FedLoad retains its response-context update; HERAFL learns from the decision context.
                 learning_context = dict(self.contexts[client.id])
                 for key, value in contexts[client.id].items():
                     if key.startswith('static_') or key in ('predicted_round_time', 'straggler_risk', 'straggler_threshold'):
                         learning_context[key] = value
+                if self.algorithm == 'HERAFL':
+                    learning_context = dict(contexts[client.id])
+                report['learning_context'] = dict(learning_context)
                 self.update_policy(client, learning_context, reward)
                 pending_energy.append((client.retention, client.round_stats['energy_consumption']))
                 updates.append((client.model, client.pruning_coordinates, client.train_samples))

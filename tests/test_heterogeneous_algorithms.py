@@ -107,6 +107,33 @@ class PolicyTests(unittest.TestCase):
         high = dict(cpu_capacity=1, c_r_i=0, bandwidth=1, energy_efficiency=1, straggler_risk=0)
         self.assertLess(policy.choose_pruning_rate(low)[0], policy.choose_pruning_rate(high)[0])
 
+    def test_hera_floor_overrides_learned_preference_and_runtime_degradation(self):
+        policy = HeraBandit([0.5, 0.722, 0.889, 1.0], alpha=0)
+        for capacity, minimum, group in ((0.2, 0.5, 'low'), (0.5, 0.70, 'medium'),
+                                         (0.9, 0.85, 'high')):
+            context = dict(static_cpu_capacity=capacity, static_compute_cost=1-capacity,
+                           cpu_capacity=0, c_r_i=1, straggler_risk=1, dataset_size=1)
+            for _ in range(20):
+                policy.update(0.5, 100, context)
+            arm, info = policy.choose_pruning_rate(context)
+            self.assertGreaterEqual(arm, minimum)
+            self.assertEqual(info['capacity_group'], group)
+            self.assertTrue(info['retention_floor_satisfied'])
+
+    def test_hera_fixed_arm_reports_unattainable_floor(self):
+        policy = HeraBandit([0.5])
+        arm, info = policy.choose_pruning_rate(dict(static_cpu_capacity=1, static_compute_cost=0))
+        self.assertEqual(arm, 0.5)
+        self.assertEqual(info['requested_retention_floor'], 0.85)
+        self.assertFalse(info['retention_floor_satisfied'])
+
+    def test_hera_rejects_invalid_floor_configuration(self):
+        for options in (dict(retention_floors=[0.9, 0.7]),
+                        dict(capacity_thresholds=[0.4, float('nan')]),
+                        dict(retention_floors=[1.1, 1.2])):
+            with self.assertRaises(ValueError):
+                HeraBandit([0.5, 1.0], **options)
+
     def test_predictor_learns_observed_time(self):
         predictor = OnlineStragglerPredictor()
         context = dict(f_i=1, dataset_size=1, c_r_i=1, b_mean=1)
@@ -165,6 +192,32 @@ class NativeServerTests(unittest.TestCase):
                 self.assertTrue(all(r['status'] == 'accepted' and 'reward' in r for r in report['clients']))
             if cls is HERAFL:
                 self.assertEqual(server.predictor.update_count, 2)
+
+    def test_hera_updates_with_selection_context(self):
+        import numpy as np
+        from flcore.servers.serverherafl import HERAFL
+        actual_update = HERAFL.update_policy
+        observed = []
+
+        def capture(server, client, context, reward):
+            observed.append((client.id, dict(context)))
+            actual_update(server, client, context, reward)
+
+        with patch.object(HERAFL, 'update_policy', capture):
+            server, _ = self.run_server(HERAFL, self.make_args(
+                algorithm='HERAFL', global_rounds=2, pruning_arms=[0.5, 0.8, 1.0]))
+        reports = [client for report in server.round_reports for client in report['clients']]
+        for (client_id, context), report in zip(observed, reports):
+            self.assertEqual(client_id, report['id'])
+            self.assertEqual(context, report['selection_context'])
+            self.assertEqual(report['learning_context'], report['selection_context'])
+        for arm in server.bandit.pruning_rates:
+            expected = np.eye(server.bandit.dim)
+            for report in reports:
+                if report['retention'] == arm:
+                    x = server.bandit.vectorize_context(report['selection_context'])
+                    expected += np.outer(x, x)
+            np.testing.assert_allclose(server.bandit.A[arm], expected)
 
     def test_aligned_comparison_shares_schedule_profiles_and_deadline(self):
         from flcore.servers.serverfedload import FedLoad, ComparisonFedAvg

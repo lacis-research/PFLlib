@@ -14,6 +14,8 @@ class LinUCBBandit:
         min_alpha_ratio=0.0,
         alpha_strategy="proportional",
         capability_guidance=None,
+        retention_floors=(0.70, 0.85),
+        capacity_thresholds=(0.40, 0.70),
     ):
         self.pruning_rates = [float(rate) for rate in pruning_rates]
         self.feature_order = feature_order or [
@@ -42,6 +44,12 @@ class LinUCBBandit:
         self.static_bias = float(self.capability_guidance.get("static_bias", 0.7))
         self.dynamic_penalty = float(self.capability_guidance.get("dynamic_penalty", 0.35))
         self.high_capacity_floor = float(self.capability_guidance.get("high_capacity_floor", 0.6))
+        self.retention_floors = tuple(float(v) for v in retention_floors)
+        self.capacity_thresholds = tuple(float(v) for v in capacity_thresholds)
+        for name, values in (("retention_floors", self.retention_floors),
+                             ("capacity_thresholds", self.capacity_thresholds)):
+            if len(values) != 2 or not all(np.isfinite(v) and 0 <= v <= 1 for v in values) or values[0] > values[1]:
+                raise ValueError(f"{name} must contain two ordered values in [0, 1].")
         self.dim = len(self.feature_order)
         self.rng = np.random.default_rng(random_seed)
         self.A = {
@@ -92,7 +100,20 @@ class LinUCBBandit:
         best_score = float("-inf")
         arm_alpha_info = {}
         target_retention = self._compute_target_retention(context)
-        for arm in self.pruning_rates:
+        # Static compute capability cannot be reduced by the selected submodel.
+        cpu = float(context.get("static_cpu_capacity", context.get("cpu_capacity", context.get("f_i", 0.5))))
+        cost = float(context.get("static_compute_cost", context.get("compute_cost", context.get("c_r_i", 0.5))))
+        capacity = float(np.clip((cpu + 1.0 - cost) / 2.0, 0, 1))
+        if capacity >= self.capacity_thresholds[1]:
+            group, requested_floor = "high", self.retention_floors[1]
+        elif capacity >= self.capacity_thresholds[0]:
+            group, requested_floor = "medium", self.retention_floors[0]
+        else:
+            group, requested_floor = "low", min(self.pruning_rates)
+        # Respect the configured action space, including fixed-arm ablations.
+        effective_floor = min(requested_floor, max(self.pruning_rates))
+        eligible_arms = [arm for arm in self.pruning_rates if arm >= effective_floor]
+        for arm in eligible_arms:
             alpha_info = self.compute_alpha_r_i(pruning_reference, candidate_arm=arm)
             current_alpha = alpha_info["alpha_r_i"]
             arm_alpha_info[arm] = alpha_info
@@ -112,6 +133,11 @@ class LinUCBBandit:
         alpha_info["selected_pruning_rate"] = float(best_arm)
         alpha_info["selection_mode"] = "linucb"
         alpha_info["target_retention"] = float(target_retention)
+        alpha_info.update(static_compute_capacity=capacity, capacity_group=group,
+                          requested_retention_floor=requested_floor,
+                          effective_retention_floor=effective_floor,
+                          retention_floor_satisfied=best_arm >= requested_floor,
+                          eligible_arms=eligible_arms)
         return float(best_arm), alpha_info
 
     def update(self, chosen_rate, reward, context):

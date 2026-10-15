@@ -27,7 +27,7 @@ conda activate pfllib
 PYTHON="${PYTHON:-python}"
 DATASET="${DATASET:-cifar10}"
 SCENARIO="${SCENARIO:-iid}"
-NUM_ROUNDS="${NUM_ROUNDS:-300}"
+NUM_ROUNDS="${NUM_ROUNDS:-200}"
 NUM_CLIENTS="${NUM_CLIENTS:-30}" # vazio: usa config.json existente ou o padrão do gerador
 SELECTION_FRACTION="${SELECTION_FRACTION:-0.2}"
 LOCAL_EPOCHS="${LOCAL_EPOCHS:-5}"

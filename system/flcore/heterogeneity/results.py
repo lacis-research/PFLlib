@@ -47,6 +47,10 @@ def save_policy_results(server):
                     global_rounds=server.global_rounds, local_epochs=server.local_epochs,
                     batch_size=server.batch_size, learning_rate=server.learning_rate,
                     client_profiles={str(c.id): c.profile for c in server.clients})
+    if server.algorithm == 'HERAFL':
+        metadata.update(hera_retention_floors=server.bandit.retention_floors,
+                        hera_capacity_thresholds=server.bandit.capacity_thresholds,
+                        policy_learning_context='selection_context')
     (directory / 'config.json').write_text(json.dumps(metadata, indent=2, allow_nan=False))
     (directory / f'{stem}_policy.json').write_text(json.dumps(server.round_reports, indent=2, allow_nan=False))
     analysis = directory / 'analysis' / stem

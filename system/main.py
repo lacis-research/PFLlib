@@ -527,6 +527,12 @@ if __name__ == "__main__":
 
     parser.add_argument('--pruning-arms', type=float, nargs='+', default=np.linspace(0.0625, 1.0, 20).tolist(),
                         help='FedLoad/HERAFL hidden channel/neuron retention ratios (0, 1].')
+    parser.add_argument('--hera-retention-floors', type=float, nargs=2, default=[0.70, 0.85],
+                        metavar=('MEDIUM', 'HIGH'),
+                        help='HERAFL minimum retention by static compute capacity; capped at the largest configured arm.')
+    parser.add_argument('--hera-capacity-thresholds', type=float, nargs=2, default=[0.40, 0.70],
+                        metavar=('MEDIUM', 'HIGH'),
+                        help='HERAFL capacity thresholds for (static CPU + 1 - static compute cost) / 2.')
     parser.add_argument('--record-resources', action='store_true',
                         help='Log FedAvg client accuracy and estimated resources alongside HDF5 results.')
     parser.add_argument('--bandit-alpha', type=float, default=1.0)
