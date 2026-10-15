@@ -16,7 +16,7 @@ import torchvision
 import logging
 
 from flcore.servers.serveravg import FedAvg
-from flcore.servers.serverfedload import FedLoad
+from flcore.servers.serverfedload import FedLoad, ComparisonFedAvg
 from flcore.servers.serverherafl import HERAFL
 from flcore.servers.serverprofiledavg import ProfiledFedAvg
 from flcore.servers.serverpFedMe import pFedMe
@@ -88,7 +88,7 @@ def run(args):
         print("Creating server and clients ...")
         start = time.time()
 
-        if args.algorithm in ('FedLoad', 'HERAFL'):
+        if args.aligned_comparison or args.algorithm in ('FedLoad', 'HERAFL'):
             torch.manual_seed(args.policy_seed + i)
             np.random.seed(args.policy_seed + i)
             random.seed(args.policy_seed + i)
@@ -203,11 +203,11 @@ def run(args):
 
         # select algorithm
         if args.algorithm == "FedAvg":
-            if hasattr(args.model, 'fc'):
+            if hasattr(args.model, 'fc') and not args.aligned_comparison:
                 args.head = copy.deepcopy(args.model.fc)
                 args.model.fc = nn.Identity()
                 args.model = BaseHeadSplit(args.model, args.head)
-            server = ProfiledFedAvg(args, i) if args.record_resources else FedAvg(args, i)
+            server = ComparisonFedAvg(args, i) if args.aligned_comparison else (ProfiledFedAvg(args, i) if args.record_resources else FedAvg(args, i))
 
         elif args.algorithm == "FedLoad":
             server = FedLoad(args, i)
@@ -537,13 +537,19 @@ if __name__ == "__main__":
                         metavar=('ACCURACY', 'ENERGY', 'TIME'))
     parser.add_argument('--client-profiles', type=str, default=None,
                         help='JSON resource profiles for FedLoad/HERAFL and FedAvg with --record-resources.')
+    parser.add_argument('--wait-for-all', action='store_true',
+                        help='Wait for all selected updates; disable deadlines, time filtering and simulated dropout. Enables aligned comparison.')
+    parser.add_argument('--aligned-comparison', action='store_true',
+                        help='Use a common synchronous lifecycle, profiles and participant schedule for FedAvg/FedLoad/HERAFL.')
     parser.add_argument('--pruning-round-timeout', type=float, default=None,
-                        help='Modeled per-client deadline in seconds; HERAFL adapts it upward.')
+                        help='Modeled per-client deadline in seconds (default: 180); fixed in aligned comparison mode.')
     parser.add_argument('--bandit-alpha-strategy', choices=['binary', 'proportional'], default='binary')
     parser.add_argument('--straggler-predictor', choices=['true', 'false'], default='true')
     parser.add_argument('--scenario', choices=['iid', 'non-iid'], default='iid')
     parser.add_argument('--reference-training', action='store_true', help='Use the Mininet optimizer with MininetCNN.')
     args = parser.parse_args()
+    if args.wait_for_all:
+        args.aligned_comparison = True
     args.model = {'vgg11': 'VGG11', 'vgg16': 'VGG16'}.get(args.model.lower(), args.model)
     args.straggler_predictor = args.straggler_predictor == 'true'
     if args.model == 'MininetCNN':
@@ -551,7 +557,10 @@ if __name__ == "__main__":
     args.algorithm = {'fedload': 'FedLoad', 'herafl': 'HERAFL', 'hera-fl': 'HERAFL',
                       'hera_fl': 'HERAFL'}.get(args.algorithm.lower(), args.algorithm)
 
-    if args.algorithm in ('FedLoad', 'HERAFL'):
+    if args.aligned_comparison and args.algorithm not in ('FedAvg', 'FedLoad', 'HERAFL'):
+        parser.error('--aligned-comparison supports FedAvg, FedLoad and HERAFL.')
+
+    if args.aligned_comparison or args.algorithm in ('FedLoad', 'HERAFL'):
         config = Path('../dataset') / args.dataset / 'config.json'
         metadata = json.loads(config.read_text()) if config.exists() else {}
         defaults = {'model': ('CNN', ['-m', '--model']),

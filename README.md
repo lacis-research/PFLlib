@@ -522,7 +522,7 @@ O preset `paper` usa capacidades de rede em {75, 25, 5} Mbps, throughput
 uniforme entre 1 e a capacidade, frequência entre 1 e 2, ciclos por amostra
 entre 5 e 30 e potências computacionais {7, 4, 3} W e de transmissão
 {2, 1.8, 1.7} W. As potências são sorteadas independentemente.
-As 100 rodadas, batch 64, learning rate 0.001 e seed 42 são escolhas da
+As 50 rodadas, batch 64, learning rate 0.001 e seed 42 são escolhas da
 implementação; esses valores não são especificados no setup do artigo.
 CINIC-10 seleciona VGG16, mas não possui gerador nativo disponível neste PFLlib;
 CIFAR-100/VGG16 é uma extensão, sem equivalência com o dataset do artigo.
@@ -532,9 +532,25 @@ HeraFL permanece na comparação como extensão ao estudo original, que não o a
 `LEARNING_RATE`, `POLICY_SEED` e `RESOURCE_PRESET` permitem sobrescritas.
 O preset `mininet` preserva os perfis anteriores. Os defaults de `main.py`
 permanecem independentes; o `start.sh` passa explicitamente o setup do artigo.
-FedAvg usa `--record-resources` para incluir energia, comunicação e tempo nos
-gráficos, com os mesmos perfis de recursos dos demais métodos. Seu ciclo nativo
-permanece de 0 até `NUM_ROUNDS`; HeraFL/FedLoad executam de 1 até `NUM_ROUNDS`.
+O `start.sh` ativa `--aligned-comparison` para os três algoritmos: exatamente
+`NUM_ROUNDS` rodadas síncronas, avaliação após agregação, mesmos participantes
+por rodada e mesmos perfis completos, inclusive limites de normalização.
+Por padrão, `WAIT_FOR_ALL=1` ativa `--wait-for-all`: a agregação espera todas
+as atualizações selecionadas, sem deadline, filtro de tempo ou dropout simulado.
+O preditor do HERAFL continua orientando a poda. Para comparar com deadline fixo
+compartilhado, use `WAIT_FOR_ALL=0 ROUND_TIMEOUT=180 ./start.sh` (segundos estimados).
+`--wait-for-all` também ativa o protocolo alinhado ao executar `main.py` diretamente.
+Nesse modo, `config.json` e os relatórios registram `round_timeout: null`,
+e a configuração registra `wait_for_all: true`, dropout zero e filtro desativado.
+A seleção estratificada do HERAFL é substituída pela seleção uniforme comum
+neste protocolo controlado. Seeds de treino e condições de recursos são
+indexadas por execução, rodada e cliente, sem depender dos sorteios da política.
+FedAvg usa o mesmo treinamento local e ciclo de agregação, com retenção 1.0;
+os otimizadores locais são recriados a cada rodada nos três métodos.
+Os arquivos `config.json` registram o protocolo, deadline, seleção, seed efetiva
+e parâmetros da política. Resultados antigos são preservados e precisam ser
+regenerados para comparar sob o protocolo alinhado. Sem `--aligned-comparison`,
+o FedAvg mantém seu ciclo nativo e o HERAFL mantém sua seleção estratificada.
 O script verifica automaticamente `config.json` e todas as partições de treino e
 teste. Reutiliza os dados somente quando clientes, cenário IID/non-IID,
 balanceamento e partição correspondem a `NUM_CLIENTS`, `SCENARIO`, `BALANCE` e

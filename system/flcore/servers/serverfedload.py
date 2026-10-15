@@ -7,6 +7,7 @@ import random
 import time
 from flcore.heterogeneity.profiles import profiles_for_algorithm
 import numpy as np
+import torch
 from flcore.servers.serverbase import Server
 from flcore.clients.clientfedload import clientFedLoad
 from flcore.heterogeneity.linucb_fedload import LinUCBBandit
@@ -38,11 +39,17 @@ class FedLoad(Server):
             raise ValueError('reward_weights must be three nonnegative values summing to one.')
         if args.pruning_round_timeout is not None and (not math.isfinite(args.pruning_round_timeout) or args.pruning_round_timeout <= 0):
             raise ValueError('pruning_round_timeout must be positive and finite.')
+        self.wait_for_all = getattr(args, 'wait_for_all', False)
+        if self.wait_for_all:
+            self.client_drop_rate = 0.0
+            self.time_select = False
+        self.aligned_comparison = getattr(args, 'aligned_comparison', False)
+        self.experiment_seed = args.policy_seed + times
         self.scenario = getattr(args, 'scenario', 'iid')
-        self.base_round_timeout = args.pruning_round_timeout or (360 if self.algorithm == "HERAFL" else 180)
+        self.base_round_timeout = math.inf if self.wait_for_all else (args.pruning_round_timeout or 180)
         self.reward_weights = args.reward_weights
         bandit_options = dict(alpha=args.bandit_alpha, beta=args.bandit_beta,
-                              random_seed=args.policy_seed,
+                              random_seed=self.experiment_seed,
                               alpha_strategy=getattr(args, 'bandit_alpha_strategy', 'binary'))
         if self.algorithm == 'HERAFL':
             bandit_options['capability_guidance'] = dict(
@@ -53,7 +60,7 @@ class FedLoad(Server):
         self.bandit = self.bandit_class(args.pruning_arms, **bandit_options)
         self.set_slow_clients()
         self.set_clients(self.client_class)
-        profiles = profiles_for_algorithm(self.num_clients, args.policy_seed, self.algorithm == "HERAFL",
+        profiles = profiles_for_algorithm(self.num_clients, args.policy_seed, self.aligned_comparison or self.algorithm == "HERAFL",
                                           preset=getattr(args, "resource_preset", "mininet"))
         if args.client_profiles:
             with open(args.client_profiles, encoding='utf-8') as stream:
@@ -138,9 +145,15 @@ class FedLoad(Server):
             # Do not retain the last assignment through the following evaluation.
             del submodel, coordinates
             active_count = int((1 - self.client_drop_rate) * len(self.selected_clients))
-            active_ids = {c.id for c in self.selected_clients} if active_count == len(self.selected_clients) else {c.id for c in random.sample(self.selected_clients, active_count)}
+            active_ids = {c.id for c in self.selected_clients} if active_count == len(self.selected_clients) else {c.id for c in (random.Random(self.experiment_seed + round_index) if self.aligned_comparison else random).sample(self.selected_clients, active_count)}
             responses, reports = [], []
             for client in self.selected_clients:
+                if self.aligned_comparison:
+                    seed = self.experiment_seed + round_index * self.num_clients + client.id
+                    torch.manual_seed(seed)
+                    np.random.seed(seed)
+                    random.seed(seed)
+                    client.system_rng = np.random.default_rng(np.random.SeedSequence([self.experiment_seed, round_index, client.id]))
                 client.train()
                 stats = client.round_stats
                 client.send_time_cost['total_cost'] += stats['download_time'] + stats['upload_time']
@@ -203,5 +216,23 @@ class FedLoad(Server):
     def select_clients(self):
         count = max(1, int(self.num_clients * self.join_ratio))
         if self.random_join_ratio:
-            count = int(np.random.randint(count, self.num_clients + 1))
-        return random.sample(self.clients, count)
+            count = int(np.random.default_rng(self.experiment_seed + self.current_round).integers(count, self.num_clients + 1)) if self.aligned_comparison else int(np.random.randint(count, self.num_clients + 1))
+        rng = random.Random(self.experiment_seed + self.current_round) if self.aligned_comparison else random
+        return rng.sample(self.clients, count)
+
+
+class FullModelPolicy:
+    """Fixed full-model baseline under the same experiment lifecycle."""
+    def __init__(self, pruning_rates, **kwargs):
+        self.pruning_rates = [1.0]
+
+    def choose_pruning_rate(self, context, pruning_reference=None):
+        return 1.0, {'selection_mode': 'full_model'}
+
+    def update(self, chosen_rate, reward, context):
+        pass
+
+
+class ComparisonFedAvg(FedLoad):
+    """FedAvg with full local models and the shared synchronous round protocol."""
+    bandit_class = FullModelPolicy

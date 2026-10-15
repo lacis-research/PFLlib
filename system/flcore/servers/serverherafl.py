@@ -37,7 +37,7 @@ class HERAFL(FedLoad):
         return contexts
 
     def round_timeout(self, contexts):
-        if not self.straggler_enabled:
+        if self.wait_for_all or self.aligned_comparison or not self.straggler_enabled:
             return self.base_round_timeout
         seconds = [c['predicted_round_time'] * max(c.get('round_time_scale', 60.0), 1.0) for c in contexts.values()]
         return max(self.base_round_timeout, max(seconds) * 1.35, float(np.mean(seconds)) * 1.5)
@@ -49,6 +49,8 @@ class HERAFL(FedLoad):
             self.predictor.update(context, observed)
 
     def select_clients(self):
+        if self.aligned_comparison:
+            return super().select_clients()
         self.selector.set_contexts(self.contexts, self.initial_contexts)
         ids = self.selector.select_trainers_for_round([c.id for c in self.clients], {})
         return [self.clients[i] for i in ids]

@@ -1,5 +1,6 @@
 """Mininet-style method/execution/analysis directories."""
 import csv
+import math
 import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -22,7 +23,24 @@ def result_directory(server):
 def save_policy_results(server):
     directory = result_directory(server)
     stem = f'{server.dataset}_{server.algorithm}_{server.goal}_{server.times}'
-    metadata = dict(algorithm=server.algorithm, dataset=server.dataset, run=server.times,
+    aligned = getattr(server, 'aligned_comparison', False)
+    metadata = dict(aligned_comparison=aligned, synchronous=True,
+                    effective_seed=getattr(server, 'experiment_seed', getattr(server.args, 'policy_seed', 42) + server.times),
+                    wait_for_all=getattr(server, 'wait_for_all', False),
+                    round_timeout=None if math.isinf(getattr(server, 'base_round_timeout', 0)) else getattr(server, 'base_round_timeout', None),
+                    time_select=server.time_select,
+                    selection='uniform_shared_schedule' if aligned else ('stratified' if server.algorithm == 'HERAFL' else 'native'),
+                    evaluation='after_aggregation' if aligned or server.algorithm in ('FedLoad', 'HERAFL') else 'before_aggregation',
+                    join_ratio=server.join_ratio, client_drop_rate=server.client_drop_rate,
+                    learning_rate_decay=server.args.learning_rate_decay,
+                    learning_rate_decay_gamma=server.args.learning_rate_decay_gamma,
+                    pruning_arms=server.bandit.pruning_rates if hasattr(server, 'bandit') else [1.0],
+                    bandit_alpha=getattr(server.args, 'bandit_alpha', None),
+                    bandit_beta=getattr(server.args, 'bandit_beta', None),
+                    bandit_alpha_strategy=getattr(server.args, 'bandit_alpha_strategy', 'binary'),
+                    reward_weights=getattr(server.args, 'reward_weights', None),
+                    straggler_predictor=getattr(server, 'straggler_enabled', False),
+                    algorithm=server.algorithm, dataset=server.dataset, run=server.times,
                     model=type(server.global_model).__name__, num_classes=server.num_classes,
                     resource_preset=getattr(server.args, "resource_preset", "mininet"),
                     seed=getattr(server.args, 'policy_seed', 42), num_clients=server.num_clients,

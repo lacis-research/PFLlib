@@ -27,7 +27,7 @@ conda activate pfllib
 PYTHON="${PYTHON:-python}"
 DATASET="${DATASET:-cifar10}"
 SCENARIO="${SCENARIO:-iid}"
-NUM_ROUNDS="${NUM_ROUNDS:-50}"
+NUM_ROUNDS="${NUM_ROUNDS:-200}"
 NUM_CLIENTS="${NUM_CLIENTS:-30}" # vazio: usa config.json existente ou o padrão do gerador
 SELECTION_FRACTION="${SELECTION_FRACTION:-0.2}"
 LOCAL_EPOCHS="${LOCAL_EPOCHS:-5}"
@@ -50,6 +50,8 @@ RESOURCE_PRESET="${RESOURCE_PRESET:-paper}"
 # Valores não informados no artigo: defaults da implementação local.
 LEARNING_RATE="${LEARNING_RATE:-0.001}"
 POLICY_SEED="${POLICY_SEED:-42}"
+ROUND_TIMEOUT="${ROUND_TIMEOUT:-180}"
+WAIT_FOR_ALL="${WAIT_FOR_ALL:-1}" # 1: agrega todas as atualizações selecionadas
 read -r -a pruning_arms <<< "$PRUNING_ARMS"
 read -r -a reward_weights <<< "$REWARD_WEIGHTS"
 
@@ -113,11 +115,17 @@ common_args=(
     -jr "$SELECTION_FRACTION" -ls "$LOCAL_EPOCHS" -lbs "$BATCH_SIZE"
     -lr "$LEARNING_RATE" --policy-seed "$POLICY_SEED"
     --resource-preset "$RESOURCE_PRESET"
+    --aligned-comparison --pruning-round-timeout "$ROUND_TIMEOUT"
     --pruning-arms "${pruning_arms[@]}"
     --bandit-alpha "$BANDIT_ALPHA" --bandit-beta "$BANDIT_BETA"
     --reward-weights "${reward_weights[@]}"
     -dev "$DEVICE" -did "$DEVICE_ID" -go "$GOAL" --scenario "$SCENARIO"
 )
+case "$WAIT_FOR_ALL" in
+    1) common_args+=(--wait-for-all) ;;
+    0) ;;
+    *) echo "WAIT_FOR_ALL deve ser 0 ou 1." >&2; exit 1 ;;
+esac
 cd "$SCRIPT_DIR/system"
 for algorithm in "${algorithms[@]}"; do
     echo "Executando $algorithm: dataset=$DATASET, cenário=$SCENARIO, goal=$GOAL"

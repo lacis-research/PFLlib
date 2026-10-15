@@ -166,6 +166,51 @@ class NativeServerTests(unittest.TestCase):
             if cls is HERAFL:
                 self.assertEqual(server.predictor.update_count, 2)
 
+    def test_aligned_comparison_shares_schedule_profiles_and_deadline(self):
+        from flcore.servers.serverfedload import FedLoad, ComparisonFedAvg
+        from flcore.servers.serverherafl import HERAFL
+        servers = []
+        for cls, algorithm in ((FedLoad, 'FedLoad'), (HERAFL, 'HERAFL'),
+                               (ComparisonFedAvg, 'FedAvg')):
+            server, _ = self.run_server(cls, self.make_args(
+                algorithm=algorithm, aligned_comparison=True,
+                global_rounds=2, pruning_round_timeout=None))
+            servers.append(server)
+            self.assertEqual(len(server.rs_test_acc), 2)
+            self.assertEqual([r['round_timeout'] for r in server.round_reports], [180, 180])
+        for server in servers[1:]:
+            self.assertEqual([c.profile for c in server.clients],
+                             [c.profile for c in servers[0].clients])
+            for first, second in zip(servers[0].round_reports, server.round_reports):
+                self.assertEqual([c['id'] for c in first['clients']],
+                                 [c['id'] for c in second['clients']])
+                self.assertEqual([c['round_stats']['throughput_mbps'] for c in first['clients']],
+                                 [c['round_stats']['throughput_mbps'] for c in second['clients']])
+        self.assertTrue(all(c['retention'] == 1 for r in servers[2].round_reports for c in r['clients']))
+
+    def test_wait_for_all_accepts_every_selected_update_despite_filters(self):
+        from flcore.servers.serverfedload import FedLoad, ComparisonFedAvg
+        from flcore.servers.serverherafl import HERAFL
+        for cls, algorithm in ((FedLoad, 'FedLoad'), (HERAFL, 'HERAFL'),
+                               (ComparisonFedAvg, 'FedAvg')):
+            server, original = self.run_server(cls, self.make_args(
+                algorithm=algorithm, aligned_comparison=True, wait_for_all=True,
+                global_rounds=2, pruning_round_timeout=1e-12,
+                client_drop_rate=0.99, time_select=True, time_threthold=1e-12))
+            self.assertEqual(server.client_drop_rate, 0)
+            self.assertFalse(server.time_select)
+            for report in server.round_reports:
+                self.assertIsNone(report['round_timeout'])
+                self.assertEqual(len(report['clients']), 2)
+                self.assertTrue(all(c['status'] == 'accepted' and 'reward' in c
+                                    for c in report['clients']))
+                self.assertTrue(all(c['round_stats']['round_time'] > 1e-12
+                                    for c in report['clients']))
+            self.assertTrue(any(not torch.equal(a, b) for a, b in
+                                zip(original.parameters(), server.global_model.parameters())))
+            if cls is HERAFL:
+                self.assertEqual(server.predictor.update_count, 4)
+
     def test_fedavg_logging_preserves_original_training(self):
         import random
         import numpy as np
