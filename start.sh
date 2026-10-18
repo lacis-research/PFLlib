@@ -27,17 +27,17 @@ conda activate pfllib
 PYTHON="${PYTHON:-python}"
 DATASET="${DATASET:-cifar10}"
 SCENARIO="${SCENARIO:-iid}"
-NUM_ROUNDS="${NUM_ROUNDS:-200}"
+NUM_ROUNDS="${NUM_ROUNDS:-50}"
 NUM_CLIENTS="${NUM_CLIENTS:-30}" # vazio: usa config.json existente ou o padrão do gerador
 SELECTION_FRACTION="${SELECTION_FRACTION:-0.2}"
 LOCAL_EPOCHS="${LOCAL_EPOCHS:-5}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
-MODEL="${MODEL:-}" # selecionado por dataset abaixo
+MODEL="${MODEL:-VGG11}" # use MODEL=VGG16 ./start.sh para o experimento com VGG16
 DEVICE="${DEVICE:-cuda}" # main.py usa CPU se CUDA não estiver disponível
 DEVICE_ID="${DEVICE_ID:-0}"
 GOAL="${GOAL:-start-$(date +%Y%m%d-%H%M%S)-$$}"
 ALGORITHMS="${ALGORITHMS:-HERAFL FedLoad FedAvg}"
-STRAGGLER_PREDICTOR="${STRAGGLER_PREDICTOR:-true}"
+HERA_SEMANTIC_POLICY="${HERA_SEMANTIC_POLICY:-linucb}" # linucb, heuristic ou legacy (controle preservado)
 BALANCE="${BALANCE:-balance}"
 PARTITION="${PARTITION:-dir}"
 COMPARE="${COMPARE:-1}"
@@ -62,13 +62,10 @@ case "${DATASET,,}" in
     cinic10|cinic-10) DATASET=Cinic10 ;;
     fashionmnist|fashion-mnist) DATASET=FashionMNIST ;;
 esac
-if [[ -z "$MODEL" ]]; then
-    case "$DATASET" in
-        Cifar10) MODEL=VGG11 ;;
-        Cinic10|Cifar100) MODEL=VGG16 ;;
-        *) MODEL=CNN ;;
-    esac
-fi
+case "${MODEL,,}" in
+    vgg11) MODEL=VGG11 ;;
+    vgg16) MODEL=VGG16 ;;
+esac
 if [[ -z "$LEARNING_RATE" ]]; then
     case "${MODEL,,}" in
         vgg11|vgg16) LEARNING_RATE=0.0001 ;;
@@ -106,6 +103,20 @@ if [[ "$COMPARE_ONLY" == "1" ]]; then
     exec "$PYTHON" tools/plot_comparison.py "${comparison_args[@]}" "$@"
 fi
 
+# Falha antes de preparar dados se a configuração semântica for incompatível.
+for algorithm in "${algorithms[@]}"; do
+    if [[ "$algorithm" == "HERAFL" ]]; then
+        case "$MODEL" in
+            CNN|DNN|VGG11|VGG16) ;;
+            *) echo "HERAFL semântico requer MODEL=CNN, DNN, VGG11 ou VGG16." >&2; exit 1 ;;
+        esac
+        case "$HERA_SEMANTIC_POLICY" in
+            linucb|heuristic|legacy) ;;
+            *) echo "HERA_SEMANTIC_POLICY deve ser linucb, heuristic ou legacy." >&2; exit 1 ;;
+        esac
+    fi
+done
+
 # Reutiliza partições compatíveis ou chama o gerador nativo automaticamente.
 prepare_args=(--dataset "$DATASET" --scenario "$SCENARIO"
               --balance "$BALANCE" --partition "$PARTITION")
@@ -120,7 +131,7 @@ common_args=(
     -nc "$dataset_clients" -ncl "$dataset_classes"
     -jr "$SELECTION_FRACTION" -ls "$LOCAL_EPOCHS" -lbs "$BATCH_SIZE"
     -lr "$LEARNING_RATE" --policy-seed "$POLICY_SEED"
-    --resource-preset "$RESOURCE_PRESET"
+    --resource-preset "$RESOURCE_PRESET" --experiment-id "${GOAL}_${MODEL}"
     --aligned-comparison --pruning-round-timeout "$ROUND_TIMEOUT"
     --pruning-arms "${pruning_arms[@]}"
     --bandit-alpha "$BANDIT_ALPHA" --bandit-beta "$BANDIT_BETA"
@@ -138,9 +149,11 @@ for algorithm in "${algorithms[@]}"; do
     algorithm_args=()
     if [[ "$algorithm" == "FedAvg" ]]; then
         algorithm_args+=(--record-resources)
+    elif [[ "$algorithm" == "HERAFL" ]]; then
+        algorithm_args+=(--hera-semantic --hera-semantic-policy "$HERA_SEMANTIC_POLICY")
     fi
     "$PYTHON" main.py "${common_args[@]}" "${algorithm_args[@]}" -algo "$algorithm" \
-        --straggler-predictor "$STRAGGLER_PREDICTOR" "$@"
+        "$@"
 done
 
 if [[ "$COMPARE" == "1" ]] && (( ${#algorithms[@]} > 1 )); then

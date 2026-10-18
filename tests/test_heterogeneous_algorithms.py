@@ -191,7 +191,7 @@ class NativeServerTests(unittest.TestCase):
                 self.assertEqual(len(report['clients']), 2)
                 self.assertTrue(all(r['status'] == 'accepted' and 'reward' in r for r in report['clients']))
             if cls is HERAFL:
-                self.assertEqual(server.predictor.update_count, 2)
+                self.assertFalse(hasattr(server, 'predictor'))
 
     def test_hera_updates_with_selection_context(self):
         import numpy as np
@@ -205,7 +205,7 @@ class NativeServerTests(unittest.TestCase):
 
         with patch.object(HERAFL, 'update_policy', capture):
             server, _ = self.run_server(HERAFL, self.make_args(
-                algorithm='HERAFL', global_rounds=2, pruning_arms=[0.5, 0.8, 1.0]))
+                algorithm='HERAFL', hera_semantic=True, global_rounds=2, pruning_arms=[0.5, 0.8, 1.0]))
         reports = [client for report in server.round_reports for client in report['clients']]
         for (client_id, context), report in zip(observed, reports):
             self.assertEqual(client_id, report['id'])
@@ -262,7 +262,7 @@ class NativeServerTests(unittest.TestCase):
             self.assertTrue(any(not torch.equal(a, b) for a, b in
                                 zip(original.parameters(), server.global_model.parameters())))
             if cls is HERAFL:
-                self.assertEqual(server.predictor.update_count, 4)
+                self.assertFalse(hasattr(server, 'predictor'))
 
     def test_aligned_fedavg_saved_rounds_match_policy_reports(self):
         import tempfile

@@ -97,7 +97,7 @@ def draw_capacity(policy_runs, output, formats):
                 for client in report['clients']:
                     context = client.get('context', client.get('selection_context', {}))
                     capacity = context.get('cpu_capacity', context.get('f_i'))
-                    if capacity is not None:
+                    if capacity is not None and client.get('retention') is not None:
                         points.append((report['round'], client['id'], client['retention'], float(capacity)))
             if points:
                 title = style(algorithm)[0] + (f' — run {run}' if len(runs) > 1 else '')

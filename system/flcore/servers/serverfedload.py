@@ -51,18 +51,13 @@ class FedLoad(Server):
         bandit_options = dict(alpha=args.bandit_alpha, beta=args.bandit_beta,
                               random_seed=self.experiment_seed,
                               alpha_strategy=getattr(args, 'bandit_alpha_strategy', 'binary'))
-        if self.algorithm == 'HERAFL':
-            bandit_options['capability_guidance'] = dict(
-                enabled=True, strength=0.6, straggler_penalty=0.15,
-                compute_weight=0.4, bandwidth_weight=0.25, energy_weight=0.15,
-                straggler_weight=0.2, static_bias=0.75, dynamic_penalty=0.25,
-                high_capacity_floor=0.65)
-            bandit_options['retention_floors'] = getattr(args, 'hera_retention_floors', (0.70, 0.85))
-            bandit_options['capacity_thresholds'] = getattr(args, 'hera_capacity_thresholds', (0.40, 0.70))
         self.bandit = self.bandit_class(args.pruning_arms, **bandit_options)
         self.set_slow_clients()
         self.set_clients(self.client_class)
-        profiles = profiles_for_algorithm(self.num_clients, args.policy_seed, self.aligned_comparison or self.algorithm == "HERAFL",
+        if getattr(args, 'reward_validation_fraction', 0.):
+            for client in self.clients:
+                client.train_samples = len(client.load_train_data().dataset)
+        profiles = profiles_for_algorithm(self.num_clients, args.policy_seed, self.aligned_comparison,
                                           preset=getattr(args, "resource_preset", "mininet"))
         if args.client_profiles:
             with open(args.client_profiles, encoding='utf-8') as stream:
@@ -127,6 +122,35 @@ class FedLoad(Server):
     def update_policy(self, client, context, reward):
         self.bandit.update(client.retention, reward, context)
 
+    def assign_submodel(self, client, context, pending_rates):
+        retention, info = self.bandit.choose_pruning_rate(context, pending_rates)
+        submodel, coordinates = prune_model(self.global_model, retention, device='cpu')
+        client.set_submodel(submodel, coordinates, retention)
+        return retention, info
+
+    def after_aggregation(self, responses, reports):
+        return {}
+
+    def evaluation_details(self):
+        if not getattr(self.args, 'detailed_evaluation', False):
+            return {}
+        from flcore.heterogeneity.semantic import classification_summary, summarize_confusion
+        total = torch.zeros(self.num_classes, self.num_classes, dtype=torch.int64)
+        clients, groups = [], {}
+        for client in self.clients:
+            matrix = classification_summary(self.global_model, client.load_test_data(), self.num_classes, self.device)
+            total += matrix
+            initial = self.initial_contexts[client.id]
+            capacity = (initial['cpu_capacity'] + 1-initial['compute_cost'])/2
+            group = 'high' if capacity >= .7 else ('medium' if capacity >= .4 else 'low')
+            groups[group] = groups.get(group, torch.zeros_like(matrix)) + matrix
+            clients.append(dict(id=client.id, capacity_group=group, **summarize_confusion(matrix)))
+        accuracies = [c['accuracy'] for c in clients if c['accuracy'] is not None]
+        return dict(test_sample_weighted=summarize_confusion(total), test_clients=clients,
+                    test_client_mean=float(np.mean(accuracies)) if accuracies else None,
+                    test_client_std=float(np.std(accuracies)) if accuracies else None,
+                    test_capacity_groups={k: summarize_confusion(v) for k, v in groups.items()})
+
     def train(self):
         for round_index in range(1, self.global_rounds + 1):
             self.current_round = round_index
@@ -138,18 +162,20 @@ class FedLoad(Server):
             pending_rates = []
             assignments = {}
             for client in self.selected_clients:
-                retention, info = self.bandit.choose_pruning_rate(contexts[client.id], pending_rates)
-                pending_rates.append(retention)
-                submodel, coordinates = prune_model(self.global_model, retention, device='cpu')
-                client.set_submodel(submodel, coordinates, retention)
+                retention, info = self.assign_submodel(client, contexts[client.id], pending_rates)
                 assignments[client.id] = info
-                client.send_time_cost['num_rounds'] += 1
-            # Do not retain the last assignment through the following evaluation.
-            del submodel, coordinates
+                if retention is not None:
+                    pending_rates.append(retention)
+                    client.send_time_cost['num_rounds'] += 1
             active_count = int((1 - self.client_drop_rate) * len(self.selected_clients))
             active_ids = {c.id for c in self.selected_clients} if active_count == len(self.selected_clients) else {c.id for c in (random.Random(self.experiment_seed + round_index) if self.aligned_comparison else random).sample(self.selected_clients, active_count)}
             responses, reports = [], []
             for client in self.selected_clients:
+                if assignments[client.id].get('selection_mode') == 'no_feasible_arm':
+                    reports.append(dict(id=client.id, retention=None, status='infeasible', accuracy=None,
+                                        num_samples=client.train_samples, selection_context=contexts[client.id],
+                                        alpha_info=assignments[client.id], round_stats={}))
+                    continue
                 if self.aligned_comparison:
                     seed = self.experiment_seed + round_index * self.num_clients + client.id
                     torch.manual_seed(seed)
@@ -165,7 +191,6 @@ class FedLoad(Server):
                     accepted = accepted and stats['round_time'] <= self.time_threthold
                 correct, samples = client.local_accuracy_metrics()
                 response_context = dict(self.contexts[client.id])
-                response_context.update({k: v for k, v in contexts[client.id].items() if k.startswith('static_') or k in ('predicted_round_time', 'straggler_risk', 'straggler_threshold')})
                 report = {'context': response_context, 'id': client.id, 'retention': client.retention,
                           'status': 'accepted' if accepted else ('dropped' if client.id not in active_ids else 'timeout'),
                           'accuracy': correct / max(samples, 1), 'num_samples': client.train_samples,
@@ -182,12 +207,9 @@ class FedLoad(Server):
                 report = next(r for r in reports if r['id'] == client.id)
                 reward, components = self.calculate_reward(client.retention, report['accuracy'], client.round_stats, time_reference)
                 report.update(reward=reward, reward_components=components)
-                # FedLoad retains its response-context update; HERAFL learns from the decision context.
+                # Semantic selection freezes its decision context; the unextended control uses FedLoad response context.
                 learning_context = dict(self.contexts[client.id])
-                for key, value in contexts[client.id].items():
-                    if key.startswith('static_') or key in ('predicted_round_time', 'straggler_risk', 'straggler_threshold'):
-                        learning_context[key] = value
-                if self.algorithm == 'HERAFL':
+                if getattr(self, 'semantic_collect', False):
                     learning_context = dict(contexts[client.id])
                 report['learning_context'] = dict(learning_context)
                 self.update_policy(client, learning_context, reward)
@@ -197,12 +219,14 @@ class FedLoad(Server):
                 self.arm_energy_history[retention].append(energy)
             self.uploaded_ids = [c.id for c in responses]
             self.global_model = aggregate_submodels(self.global_model, updates)
+            extra_report = self.after_aggregation(responses, reports)
             if round_index % self.eval_gap == 0:
                 for client in self.clients:
                     client.model = self.global_model
                 self.evaluate()
+                extra_report.update(self.evaluation_details())
             self.round_reports.append({'global_accuracy': self.rs_test_acc[-1] if round_index % self.eval_gap == 0 else None, 'round': round_index, 'round_timeout': None if math.isinf(timeout) else timeout,
-                                       'clients': reports})
+                                       'clients': reports, **extra_report})
             self.Budget.append(time.perf_counter() - started)
             print('Retentions:', {c.id: c.retention for c in self.selected_clients})
             print('Accepted updates:', len(responses), '| time cost:', self.Budget[-1])

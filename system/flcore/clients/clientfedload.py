@@ -9,6 +9,10 @@ from flcore.clients.clientbase import Client
 class clientFedLoad(Client):
     def __init__(self, args, id, train_samples, test_samples, **kwargs):
         super().__init__(args, id, train_samples, test_samples, **kwargs)
+        self.validation_fraction = getattr(args, 'reward_validation_fraction', 0.0)
+        self.validation_seed = getattr(args, 'policy_seed', 42)
+        if not np.isfinite(self.validation_fraction) or not 0 <= self.validation_fraction < 1:
+            raise ValueError('reward_validation_fraction must be in [0, 1).')
         self.decay_gamma = args.learning_rate_decay_gamma
         self.profile = {}
         self.system_rng = np.random.default_rng(4200 + id)
@@ -20,6 +24,19 @@ class clientFedLoad(Client):
         if self.algorithm in ('FedLoad', 'HERAFL'):
             self.optimizer = None
             self.learning_rate_scheduler = None
+
+    def load_train_data(self, batch_size=None):
+        loader = super().load_train_data(batch_size)
+        if not self.validation_fraction:
+            return loader
+        from torch.utils.data import Subset
+        order = np.random.default_rng(self.validation_seed + self.id).permutation(len(loader.dataset))
+        count = max(1, int(len(order) * self.validation_fraction))
+        if count >= len(order):
+            raise ValueError('Validation split requires at least two training examples.')
+        self.validation_data = Subset(loader.dataset, order[:count].tolist())
+        return DataLoader(Subset(loader.dataset, order[count:].tolist()),
+                          batch_size=batch_size or self.batch_size, shuffle=True, drop_last=False)
 
     def set_submodel(self, model, coordinates, retention):
         self.model = model
@@ -111,7 +128,11 @@ class clientFedLoad(Client):
 
     def local_accuracy_metrics(self):
         """Evaluate the client's native PFLlib test partition."""
-        loader = self.load_test_data()
+        if self.validation_fraction:
+            self.load_train_data()
+            loader = DataLoader(self.validation_data, batch_size=self.batch_size, shuffle=False)
+        else:
+            loader = self.load_test_data()
         correct = samples = 0
         self.model.eval()
         with torch.no_grad():

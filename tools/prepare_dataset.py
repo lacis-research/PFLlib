@@ -4,6 +4,8 @@ import argparse
 from contextlib import contextmanager, redirect_stdout
 import inspect
 import json
+import math
+import random
 import os
 import pickle
 import zipfile
@@ -59,7 +61,7 @@ def inspect_partitions(directory, expected):
     return classes, None
 
 
-def prepare_dataset(root, dataset, scenario, clients=None, balance=True, partition='dir'):
+def prepare_dataset(root, dataset, scenario, clients=None, balance=True, partition='dir', dirichlet_alpha=None, partition_seed=None, output_name=None):
     root = Path(root).resolve()
     normalized = dataset.lower().replace('-', '')
     generator = next((p for p in root.glob('generate_*.py')
@@ -75,21 +77,35 @@ def prepare_dataset(root, dataset, scenario, clients=None, balance=True, partiti
         generate = module.get('generate_dataset')
         if not callable(generate) or len(inspect.signature(generate).parameters) != 5:
             raise ValueError(f'{generator.name} não aceita cenário, clientes, balanceamento e partição.')
-        directory = Path(module['dir_path'])
+        if dirichlet_alpha is not None and (not math.isfinite(dirichlet_alpha) or dirichlet_alpha <= 0):
+            raise ValueError('dirichlet_alpha deve ser positivo e finito.')
+        if output_name is not None and (Path(output_name).name != output_name or output_name in ('.', '..')):
+            raise ValueError('output_name deve ser um nome simples de diretório.')
+        directory = Path(output_name or module['dir_path'])
         metadata = read_config(directory)
         count = clients if clients is not None else metadata.get('num_clients', module['num_clients'])
         if not isinstance(count, int) or count < 1:
             raise ValueError('NUM_CLIENTS deve ser positivo.')
         native_check = generate.__globals__.get('check')
         check_globals = getattr(native_check, '__globals__', {})
+        if dirichlet_alpha is not None:
+            check_globals['alpha'] = dirichlet_alpha
+            for name in ('separate_data', 'save_file'):
+                function = generate.__globals__.get(name)
+                if function is not None:
+                    function.__globals__['alpha'] = dirichlet_alpha
         expected = dict(num_clients=count, non_iid=scenario == 'non-iid', balance=balance,
                         partition=partition if scenario == 'non-iid' else None)
         # These are native partitioning constants, distinct from training BATCH_SIZE.
         for key in ('alpha', 'batch_size'):
             if key in check_globals:
                 expected[key] = check_globals[key]
+        if partition_seed is not None:
+            expected['partition_seed'] = partition_seed
         classes, reason = inspect_partitions(directory, expected)
         if reason:
+            if metadata and (dirichlet_alpha is not None or partition_seed is not None or output_name is not None) and any(metadata.get(k) != v for k, v in expected.items()):
+                raise ValueError('Partição incompatível já existe; use outro --output-name para preservá-la.')
             print(f'Gerando {dataset}: {reason}.', file=sys.stderr)
             for split in ('train', 'test'):
                 (directory / split).mkdir(parents=True, exist_ok=True)
@@ -98,9 +114,18 @@ def prepare_dataset(root, dataset, scenario, clients=None, balance=True, partiti
             original_check = generate.__globals__.get('check')
             generate.__globals__['check'] = lambda *args, **kwargs: False
             try:
+                if partition_seed is not None:
+                    np.random.seed(partition_seed)
+                    random.seed(partition_seed)
                 generate(str(directory) + '/', count, expected['non_iid'], balance, expected['partition'])
             finally:
                 generate.__globals__['check'] = original_check
+            if partition_seed is not None or output_name is not None:
+                generated = read_config(directory)
+                generated.update(dataset=dataset)
+                if partition_seed is not None:
+                    generated['partition_seed'] = partition_seed
+                (directory / 'config.json').write_text(json.dumps(generated, indent=2))
             classes, reason = inspect_partitions(directory, expected)
             if reason:
                 raise ValueError(f'O gerador não produziu partições válidas: {reason}.')
@@ -117,10 +142,13 @@ def main():
     parser.add_argument('--num-clients', type=int)
     parser.add_argument('--balance', choices=['balance', 'unbalanced', '-'], default='balance')
     parser.add_argument('--partition', default='dir')
+    parser.add_argument('--dirichlet-alpha', type=float)
+    parser.add_argument('--partition-seed', type=int)
+    parser.add_argument('--output-name')
     args = parser.parse_args()
     try:
         print(*prepare_dataset(args.dataset_root, args.dataset, args.scenario, args.num_clients,
-                               args.balance == 'balance', args.partition))
+                               args.balance == 'balance', args.partition, args.dirichlet_alpha, args.partition_seed, args.output_name))
     except ValueError as error:
         parser.exit(1, f'{error}\n')
 

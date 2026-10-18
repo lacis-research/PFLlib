@@ -91,6 +91,18 @@ class DatasetPreparationTests(unittest.TestCase):
         self.prepare()
         self.assertEqual(self.calls(), 2)
 
+    def test_explicit_alpha_seed_named_cache_and_incompatible_protection(self):
+        self.prepare(dirichlet_alpha=.5, partition_seed=7, output_name='Fixture_alpha05')
+        output = self.root / 'Fixture_alpha05'
+        metadata = json.loads((output / 'config.json').read_text())
+        self.assertEqual(metadata['alpha'], .5)
+        self.assertEqual(metadata['partition_seed'], 7)
+        self.prepare(dirichlet_alpha=.5, partition_seed=7, output_name='Fixture_alpha05')
+        self.assertEqual((output / 'calls.txt').read_text(), '1')
+        with self.assertRaisesRegex(ValueError, 'incompatível'):
+            self.prepare(dirichlet_alpha=.2, partition_seed=7, output_name='Fixture_alpha05')
+        self.assertEqual(json.loads((output / 'config.json').read_text())['alpha'], .5)
+
     def test_invalid_arguments_do_not_generate(self):
         for settings in (dict(clients=0), dict(partition='unknown')):
             with self.assertRaises(ValueError):

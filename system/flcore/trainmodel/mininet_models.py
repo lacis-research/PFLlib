@@ -36,7 +36,7 @@ class MininetCNN(nn.Module):
                 nn.init.xavier_uniform_(layer.weight)
                 nn.init.zeros_(layer.bias)
 
-    def forward(self, x):
+    def augment_inputs(self, x):
         if self.training and self.augment:
             flip = torch.rand(len(x), 1, 1, 1, device=x.device) < 0.5
             x = torch.where(flip, x.flip(-1), x)
@@ -44,4 +44,7 @@ class MininetCNN(nn.Module):
             theta[:, :, 2] = torch.empty(len(x), 2, device=x.device).uniform_(-0.2, 0.2)
             grid = F.affine_grid(theta, x.shape, align_corners=False)
             x = F.grid_sample(x, grid, mode='bilinear', padding_mode='reflection', align_corners=False)
-        return self.layers(x)
+        return x
+
+    def forward(self, x):
+        return self.layers(self.augment_inputs(x))

@@ -12,7 +12,7 @@ Com o ambiente `pfllib` ativo e as partições do dataset já geradas, a partir 
 
 ```bash
 python main.py -data MNIST -m CNN -algo FedLoad -gr 10 -did 0
-python main.py -data MNIST -m CNN -algo HERAFL -gr 10 -did 0
+python main.py -data MNIST -m CNN -algo HERAFL --hera-semantic -gr 10 -did 0
 ```
 
 Use `-dev cpu` para executar sem GPU. Os nomes `fedload`, `herafl`, `HeraFL`,
@@ -43,23 +43,27 @@ transição convolução → camada linear respeitam o flatten NCHW do PyTorch.
 A agregação pondera cada posição pela quantidade de amostras dos clientes que
 a receberam. Posições não cobertas conservam o peso global anterior.
 
-As políticas LinUCB foram copiadas de `server/bandits/linucb_fedload.py` e
-`server/bandits/linucb_hera.py` do projeto de origem; o preditor online veio de
-`server/straggler.py`. A recompensa e o timeout adaptativo seguem os respectivos
-controllers. O FedLoad usa o contexto de recursos; o HERAFL acrescenta risco
-de atraso, previsão de tempo e orientação pela capacidade estática e dinâmica.
+FedLoad e HERAFL usam a política de `linucb_fedload.py`. HERAFL acrescenta somente
+a extensão semântica quando `--hera-semantic` está ativo. Sem essa opção é um
+controle FedLoad. Ambos compartilham seleção uniforme, perfis e timeout; não há
+orientação de capacidade, pisos, seleção estratificada ou preditor de stragglers
+no HERAFL atual. Os módulos da versão anterior são apenas referência histórica.
 
 O treino usa SGD e a perda do `Client` original do PFLlib, com `-lr`, `-ls`,
 `-lbs` e decay. O otimizador é reconstruído a cada submodelo, preservando o
 cronograma de learning rate. O treino não reutiliza os modelos/otimizadores do
-runtime TensorFlow. A avaliação global utiliza todos os clientes com cópias do
+runtime TensorFlow. A avaliação global utiliza todos os clientes compartilhando o
 modelo completo. A acurácia local no teste alimenta a recompensa, portanto este
 protocolo deve ser considerado ao comparar resultados com métodos que reservam
 um conjunto de validação separado.
 
-Assim como o FedAvg desta versão do PFLlib, o loop percorre `0..global_rounds`,
-com avaliação antes do treino. Por exemplo, `-gr 1` faz duas iterações. O JSON
-registra todas as iterações; o HDF5 registra as avaliações nos intervalos `-eg`.
+FedLoad/HERAFL e FedAvg alinhado percorrem `1..global_rounds`, com avaliação
+após agregação. `-gr 1` executa uma rodada. O JSON registra todas as rodadas;
+o HDF5 registra avaliações nos intervalos `-eg`. O FedAvg nativo não alinhado
+mantém seu ciclo próprio.
+
+A extensão opcional `--hera-semantic`, a validação reservada para recompensa e
+os comandos de ablação estão em [HERAFL semântico](herafl_semantic.md).
 
 ## Recursos e parâmetros
 
@@ -86,7 +90,7 @@ comunicação estimada, e não representa paralelismo real entre máquinas.
 | `--policy-seed` | `42` | Seed do bandit, somada ao índice da repetição |
 | `--reward-weights` | `0.6 0.2 0.2` | Pesos de acurácia, energia e tempo; soma igual a 1 |
 | `--client-profiles` | ausente | Arquivo JSON com perfis por ID |
-| `--pruning-round-timeout` | `300` | Prazo estimado em segundos; HERAFL pode aumentá-lo |
+| `--pruning-round-timeout` | `180` | Prazo estimado em segundos; Mesmo protocolo para FedLoad/HERAFL |
 
 O timeout filtra atualizações depois do treino local; ele não interrompe o
 processo de treino. `client_drop_rate` também filtra respostas. Se nenhum cliente

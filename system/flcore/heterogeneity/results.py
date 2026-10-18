@@ -1,5 +1,6 @@
 """Mininet-style method/execution/analysis directories."""
 import csv
+import re
 import math
 import json
 from datetime import datetime
@@ -15,7 +16,11 @@ def result_directory(server):
         scenario = ('non_iid' if metadata['non_iid'] else 'iid') if 'non_iid' in metadata else getattr(server, 'scenario', 'iid').replace('-', '_')
         stamp = datetime.now(ZoneInfo('America/Belem')).strftime('%Y%m%d_%Hh%Mm%Ss_%f')
         name = 'hera_fl' if method == 'herafl' else method
-        server.result_directory = Path('../results') / method / f'{stamp}_{name}_experiment_{server.dataset.lower()}_{scenario}_run{server.times}'
+        variant = ''
+        if getattr(server, 'semantic_enabled', False):
+            variant = '_semantic_' + server.bandit.policy + '_' + ''.join(server.semantic_features)
+        experiment = re.sub(r'[^a-zA-Z0-9_.-]', '_', getattr(server.args, 'experiment_id', 'default'))
+        server.result_directory = Path('../results') / method / f'{stamp}_{name}{variant}_{experiment}_experiment_{server.dataset.lower()}_{scenario}_run{server.times}'
     server.result_directory.mkdir(parents=True, exist_ok=True)
     return server.result_directory
 
@@ -29,7 +34,7 @@ def save_policy_results(server):
                     wait_for_all=getattr(server, 'wait_for_all', False),
                     round_timeout=None if math.isinf(getattr(server, 'base_round_timeout', 0)) else getattr(server, 'base_round_timeout', None),
                     time_select=server.time_select,
-                    selection='uniform_shared_schedule' if aligned else ('stratified' if server.algorithm == 'HERAFL' else 'native'),
+                    selection='uniform_shared_schedule' if aligned else 'native',
                     evaluation='after_aggregation' if aligned or server.algorithm in ('FedLoad', 'HERAFL') else 'before_aggregation',
                     join_ratio=server.join_ratio, client_drop_rate=server.client_drop_rate,
                     learning_rate_decay=server.args.learning_rate_decay,
@@ -48,9 +53,18 @@ def save_policy_results(server):
                     batch_size=server.batch_size, learning_rate=server.learning_rate,
                     client_profiles={str(c.id): c.profile for c in server.clients})
     if server.algorithm == 'HERAFL':
-        metadata.update(hera_retention_floors=server.bandit.retention_floors,
-                        hera_capacity_thresholds=server.bandit.capacity_thresholds,
-                        policy_learning_context='selection_context')
+        metadata.update(hera_base='FedLoad', hera_variant='fedload-semantic-v2',
+                        policy_learning_context='selection_context' if getattr(server, 'semantic_collect', False) else 'response_context')
+    partition_config = Path('../dataset') / server.dataset / 'config.json'
+    metadata['partition_metadata'] = json.loads(partition_config.read_text()) if partition_config.exists() else None
+    metadata['training_config'] = {k: v for k, v in vars(server.args).items() if isinstance(v, (str, int, float, bool, list, tuple, type(None)))}
+    metadata.update(experiment_id=getattr(server.args, 'experiment_id', 'default'),
+                    reward_validation_fraction=getattr(server.args, 'reward_validation_fraction', 0.),
+                    reward_source='held_out_train' if getattr(server.args, 'reward_validation_fraction', 0.) else 'test_legacy')
+    if getattr(server, 'semantic_enabled', False):
+        metadata.update(semantic_schema=server.bandit.schema, semantic_feature_order=server.bandit.feature_order,
+                        semantic_config={k: v for k, v in vars(server.args).items() if k.startswith('hera_')},
+                        semantic_costs=server.semantic_costs, resume_supported=False)
     (directory / 'config.json').write_text(json.dumps(metadata, indent=2, allow_nan=False))
     (directory / f'{stem}_policy.json').write_text(json.dumps(server.round_reports, indent=2, allow_nan=False))
     analysis = directory / 'analysis' / stem

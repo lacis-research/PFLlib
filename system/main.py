@@ -525,14 +525,27 @@ if __name__ == "__main__":
     parser.add_argument('-cmss', "--collaberative_model_select_strategy", type=int, default=1)
 
 
+    parser.add_argument('--hera-semantic', action='store_true')
+    parser.add_argument('--hera-semantic-policy', choices=['linucb', 'heuristic', 'legacy'], default='linucb')
+    parser.add_argument('--hera-semantic-features', default='H,U,D,Q')
+    parser.add_argument('--hera-semantic-max-age', type=int, default=5)
+    parser.add_argument('--hera-semantic-warmup-rounds', type=int, default=1)
+    parser.add_argument('--hera-semantic-reward-weight', type=float, default=0.)
+    parser.add_argument('--hera-semantic-reward-time-scale', type=float, default=60.)
+    parser.add_argument('--hera-rpcl-weight', type=float, default=0.)
+    parser.add_argument('--hera-cpdr-weight', type=float, default=0.)
+    parser.add_argument('--hera-semantic-temperature', type=float, default=.05)
+    parser.add_argument('--hera-semantic-neighbors', type=int, default=1)
+    parser.add_argument('--hera-heuristic-weight', type=float, default=.6)
+    parser.add_argument('--hera-heuristic-cost-weight', type=float, default=.1)
+    parser.add_argument('--hera-semantic-memory-limit', type=float, help='Estimated parameter/gradient/SGD bytes limit (not peak memory).')
+    parser.add_argument('--hera-semantic-time-limit', type=float, help='Predicted client seconds limit; timeout still applies.')
+    parser.add_argument('--hera-semantic-shuffle', action='store_true')
+    parser.add_argument('--reward-validation-fraction', type=float, default=0., help='Held-out fraction of native training data for reward in the aligned protocol.')
+    parser.add_argument('--detailed-evaluation', action='store_true')
+    parser.add_argument('--experiment-id', default='default')
     parser.add_argument('--pruning-arms', type=float, nargs='+', default=np.linspace(0.0625, 1.0, 20).tolist(),
                         help='FedLoad/HERAFL hidden channel/neuron retention ratios (0, 1].')
-    parser.add_argument('--hera-retention-floors', type=float, nargs=2, default=[0.70, 0.85],
-                        metavar=('MEDIUM', 'HIGH'),
-                        help='HERAFL minimum retention by static compute capacity; capped at the largest configured arm.')
-    parser.add_argument('--hera-capacity-thresholds', type=float, nargs=2, default=[0.40, 0.70],
-                        metavar=('MEDIUM', 'HIGH'),
-                        help='HERAFL capacity thresholds for (static CPU + 1 - static compute cost) / 2.')
     parser.add_argument('--record-resources', action='store_true',
                         help='Log FedAvg client accuracy and estimated resources alongside HDF5 results.')
     parser.add_argument('--bandit-alpha', type=float, default=1.0)
@@ -550,18 +563,21 @@ if __name__ == "__main__":
     parser.add_argument('--pruning-round-timeout', type=float, default=None,
                         help='Modeled per-client deadline in seconds (default: 180); fixed in aligned comparison mode.')
     parser.add_argument('--bandit-alpha-strategy', choices=['binary', 'proportional'], default='binary')
-    parser.add_argument('--straggler-predictor', choices=['true', 'false'], default='true')
     parser.add_argument('--scenario', choices=['iid', 'non-iid'], default='iid')
     parser.add_argument('--reference-training', action='store_true', help='Use the Mininet optimizer with MininetCNN.')
     args = parser.parse_args()
     if args.wait_for_all:
         args.aligned_comparison = True
     args.model = {'vgg11': 'VGG11', 'vgg16': 'VGG16'}.get(args.model.lower(), args.model)
-    args.straggler_predictor = args.straggler_predictor == 'true'
     if args.model == 'MininetCNN':
         args.reference_training = True
     args.algorithm = {'fedload': 'FedLoad', 'herafl': 'HERAFL', 'hera-fl': 'HERAFL',
                       'hera_fl': 'HERAFL'}.get(args.algorithm.lower(), args.algorithm)
+
+    if args.hera_semantic and args.algorithm != 'HERAFL':
+        parser.error('--hera-semantic requires HERAFL.')
+    if args.reward_validation_fraction and not (args.aligned_comparison or args.algorithm in ('FedLoad', 'HERAFL')):
+        parser.error('--reward-validation-fraction requires the aligned comparison protocol.')
 
     if args.aligned_comparison and args.algorithm not in ('FedAvg', 'FedLoad', 'HERAFL'):
         parser.error('--aligned-comparison supports FedAvg, FedLoad and HERAFL.')

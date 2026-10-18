@@ -13,11 +13,13 @@ def validate_model(model):
         raise ValueError('FedLoad/HERAFL support native CNN (FedAvgCNN), DNN, MLR, MininetCNN, VGG11 and VGG16 models.')
 
 
-def prune_model(model, retention, device=None):
+def prune_model(model, retention, device=None, preserve_representation=False):
     """Return a physically smaller model and parameter coordinates for recovery."""
     validate_model(model)
     if not math.isfinite(retention) or not 0 < retention <= 1:
         raise ValueError('Retention must be in (0, 1].')
+    if preserve_representation and type(model) not in (FedAvgCNN, DNN, VGG11, VGG16):
+        raise ValueError("Semantic representation preservation supports only FedAvgCNN, DNN, VGG11 and VGG16.")
     result = copy.deepcopy(model)
     if device is not None:
         result.to(device)
@@ -29,7 +31,7 @@ def prune_model(model, retention, device=None):
     for index, (name, layer) in enumerate(layers):
         weight = layer.weight.detach().to(device) if device is not None else layer.weight.detach()
         outputs = torch.arange(weight.shape[0], device=weight.device)
-        if index < len(layers) - 1:
+        if index < len(layers) - (2 if preserve_representation else 1):
             importance = weight.abs().flatten(1).sum(1)
             outputs = torch.argsort(importance, descending=True, stable=True)[
                 :max(1, math.floor(len(outputs) * retention))].sort().values
@@ -45,6 +47,9 @@ def prune_model(model, retention, device=None):
                     spatial, device=weight.device)[None, :]).flatten()
             else:
                 inputs = previous
+        if preserve_representation and type(model) is DNN and index == 0:
+            inputs = torch.argsort(weight.abs().sum(0), descending=True, stable=True)[:max(1, math.floor(weight.shape[1] * retention))].sort().values
+            result.register_buffer("semantic_input_indices", inputs.clone(), persistent=False)
         target = result.get_submodule(name)
         target.weight = nn.Parameter(weight.index_select(0, outputs).index_select(1, inputs).clone())
         coordinates[name + '.weight'] = (outputs, inputs)

@@ -133,7 +133,7 @@ class AmazonMLP(nn.Module):
 #         self.act = nn.ReLU(inplace=True)
 #         self.maxpool = nn.MaxPool2d(kernel_size=(2, 2))
 
-#     def forward(self, x):
+#     def forward_features(self, x):
 #         x = self.act(self.conv1(x))
 #         x = self.maxpool(x)
 #         x = self.act(self.conv2(x))
@@ -172,13 +172,19 @@ class FedAvgCNN(nn.Module):
         )
         self.fc = nn.Linear(512, num_classes)
 
-    def forward(self, x):
+    def forward_features(self, x):
         out = self.conv1(x)
         out = self.conv2(out)
         out = torch.flatten(out, 1)
         out = self.fc1(out)
-        out = self.fc(out)
         return out
+
+    def forward_with_features(self, x):
+        features = self.forward_features(x)
+        return self.fc(features), features
+
+    def forward(self, x):
+        return self.forward_with_features(x)[0]
 
 # ====================================================================================================================
 
@@ -246,12 +252,18 @@ class DNN(nn.Module):
         self.fc1 = nn.Linear(input_dim, mid_dim)
         self.fc = nn.Linear(mid_dim, num_classes)
 
-    def forward(self, x):
+    def forward_features(self, x):
         x = torch.flatten(x, 1)
-        x = F.relu(self.fc1(x))
-        x = self.fc(x)
-        x = F.log_softmax(x, dim=1)
-        return x
+        if hasattr(self, 'semantic_input_indices'):
+            x = x.index_select(1, self.semantic_input_indices)
+        return F.relu(self.fc1(x))
+
+    def forward_with_features(self, x):
+        features = self.forward_features(x)
+        return F.log_softmax(self.fc(features), dim=1), features
+
+    def forward(self, x):
+        return self.forward_with_features(x)[0]
 
 # ====================================================================================================================
 
