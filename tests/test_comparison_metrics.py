@@ -23,3 +23,12 @@ class ComparisonMetricTests(unittest.TestCase):
         self.assertEqual(experiment_total(reports, 'round_time'), 11)
         self.assertEqual(experiment_total(reports, 'energy_consumption'), 16)
         self.assertEqual(experiment_total(reports, 'total_communication_bytes'), 60)
+
+    def test_prototype_totals_include_rejected_clients_and_protocol_overhead(self):
+        reports = [{'round': 1, 'initialization_bytes': 100, 'evaluation_telemetry_bytes': 5,
+                    'clients': [
+                        {'status': 'accepted', 'round_stats': {'total_communication_bytes': 10}},
+                        {'status': 'dropped', 'round_stats': {'total_communication_bytes': 20}},
+                        {'status': 'infeasible', 'round_stats': {}}]}]
+        self.assertEqual(experiment_total(reports, 'total_communication_bytes'), 10)
+        self.assertEqual(experiment_total(reports, 'total_communication_bytes', include_all=True), 135)

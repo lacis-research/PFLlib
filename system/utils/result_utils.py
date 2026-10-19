@@ -34,7 +34,10 @@ def read_data_then_delete(file_name, delete=False):
             raise FileNotFoundError(file_path)
         file_path = str(max(candidates, key=lambda path: path.stat().st_mtime))
     with h5py.File(file_path, 'r') as hf:
-        rs_test_acc = np.array(hf.get('rs_test_acc'))
+        metric = 'rs_local_test_acc' if 'rs_local_test_acc' in hf else 'rs_test_acc'
+        if metric == 'rs_local_test_acc':
+            print('Evaluation: sample-weighted persistent local models (not a global model).')
+        rs_test_acc = np.array(hf[metric])
 
     if delete:
         os.remove(file_path)

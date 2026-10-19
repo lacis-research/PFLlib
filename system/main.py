@@ -527,6 +527,16 @@ if __name__ == "__main__":
 
     parser.add_argument('--hera-semantic', action='store_true')
     parser.add_argument('--hera-semantic-policy', choices=['linucb', 'heuristic', 'legacy'], default='linucb')
+    parser.add_argument('--hera-communication', choices=['parameters', 'prototypes'], default='parameters')
+    parser.add_argument('--hera-prototype-kind', choices=['simple', 'relational'], default='simple')
+    parser.add_argument('--hera-prototype-policy', choices=['resources', 'semantic'], default='resources')
+    parser.add_argument('--hera-align-weight', type=float, default=1.)
+    parser.add_argument('--hera-local-only', action='store_true', help='Independent client bandits and no learning communication after initialization.')
+    parser.add_argument('--hera-checkpoint-every', type=int, default=0, help='Prototype checkpoint interval; 0 disables periodic saves. Removed after successful export unless --hera-keep-checkpoints.')
+    parser.add_argument('--hera-keep-checkpoints', action='store_true', help='Keep periodic checkpoints and save a final checkpoint after export; otherwise remove training state after metrics/plots are saved.')
+    parser.add_argument('--hera-client-storage', choices=['disk', 'memory'], default='disk', help='Store inactive prototype clients on disk to bound RAM use.')
+    parser.add_argument('--hera-state-dir', help='Parent directory for temporary client states; defaults to workspace tmp/.')
+    parser.add_argument('--hera-resume', help='Trusted local prototype checkpoint directory.')
     parser.add_argument('--hera-semantic-features', default='H,U,D,Q')
     parser.add_argument('--hera-semantic-max-age', type=int, default=5)
     parser.add_argument('--hera-semantic-warmup-rounds', type=int, default=1)
@@ -574,6 +584,12 @@ if __name__ == "__main__":
     args.algorithm = {'fedload': 'FedLoad', 'herafl': 'HERAFL', 'hera-fl': 'HERAFL',
                       'hera_fl': 'HERAFL'}.get(args.algorithm.lower(), args.algorithm)
 
+    if args.hera_communication == 'prototypes' and args.algorithm != 'HERAFL':
+        parser.error('--hera-communication prototypes requires HERAFL.')
+    if args.hera_local_only and args.hera_communication != 'prototypes':
+        parser.error('--hera-local-only requires prototype communication.')
+    if args.hera_resume and args.hera_communication != 'prototypes':
+        parser.error('--hera-resume requires prototype communication.')
     if args.hera_semantic and args.algorithm != 'HERAFL':
         parser.error('--hera-semantic requires HERAFL.')
     if args.reward_validation_fraction and not (args.aligned_comparison or args.algorithm in ('FedLoad', 'HERAFL')):

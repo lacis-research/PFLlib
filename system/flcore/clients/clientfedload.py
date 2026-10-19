@@ -25,18 +25,22 @@ class clientFedLoad(Client):
             self.optimizer = None
             self.learning_rate_scheduler = None
 
-    def load_train_data(self, batch_size=None):
+    def _split_train_data(self, batch_size=None):
         loader = super().load_train_data(batch_size)
         if not self.validation_fraction:
-            return loader
+            return loader, None
         from torch.utils.data import Subset
         order = np.random.default_rng(self.validation_seed + self.id).permutation(len(loader.dataset))
         count = max(1, int(len(order) * self.validation_fraction))
         if count >= len(order):
             raise ValueError('Validation split requires at least two training examples.')
-        self.validation_data = Subset(loader.dataset, order[:count].tolist())
+        validation = Subset(loader.dataset, order[:count].tolist())
         return DataLoader(Subset(loader.dataset, order[count:].tolist()),
-                          batch_size=batch_size or self.batch_size, shuffle=True, drop_last=False)
+                          batch_size=batch_size or self.batch_size, shuffle=True, drop_last=False), validation
+
+    def load_train_data(self, batch_size=None):
+        # Keep validation local: a Subset retains the entire source partition.
+        return self._split_train_data(batch_size)[0]
 
     def set_submodel(self, model, coordinates, retention):
         self.model = model
@@ -115,6 +119,7 @@ class clientFedLoad(Client):
             'energy_consumption': compute_energy + upload_energy + download_energy,
             'energy_source': 'profile_model', 'communication_source': 'profile_model',
             'download_bytes': size, 'upload_bytes': size,
+            'parameter_download_bytes': size, 'parameter_upload_bytes': size,
             'total_communication_bytes': 2 * size, 'throughput_mbps': throughput,
         }
 
@@ -129,8 +134,8 @@ class clientFedLoad(Client):
     def local_accuracy_metrics(self):
         """Evaluate the client's native PFLlib test partition."""
         if self.validation_fraction:
-            self.load_train_data()
-            loader = DataLoader(self.validation_data, batch_size=self.batch_size, shuffle=False)
+            _, validation = self._split_train_data()
+            loader = DataLoader(validation, batch_size=self.batch_size, shuffle=False)
         else:
             loader = self.load_test_data()
         correct = samples = 0

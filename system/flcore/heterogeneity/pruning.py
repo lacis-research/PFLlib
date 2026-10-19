@@ -20,9 +20,10 @@ def prune_model(model, retention, device=None, preserve_representation=False):
         raise ValueError('Retention must be in (0, 1].')
     if preserve_representation and type(model) not in (FedAvgCNN, DNN, VGG11, VGG16):
         raise ValueError("Semantic representation preservation supports only FedAvgCNN, DNN, VGG11 and VGG16.")
-    result = copy.deepcopy(model)
-    if device is not None:
-        result.to(device)
+    # Copy module structure, but avoid cloning full weights before replacing
+    # every supported Conv/Linear parameter with its selected sub-tensor.
+    # Do not move this temporary structure: parameters still alias the source.
+    result = copy.deepcopy(model, {id(p): p for p in model.parameters()})
     layers = [(name, layer) for name, layer in model.named_modules()
               if isinstance(layer, (nn.Conv2d, nn.Linear))]
     coordinates = {}
@@ -51,16 +52,18 @@ def prune_model(model, retention, device=None, preserve_representation=False):
             inputs = torch.argsort(weight.abs().sum(0), descending=True, stable=True)[:max(1, math.floor(weight.shape[1] * retention))].sort().values
             result.register_buffer("semantic_input_indices", inputs.clone(), persistent=False)
         target = result.get_submodule(name)
-        target.weight = nn.Parameter(weight.index_select(0, outputs).index_select(1, inputs).clone())
+        target.weight = nn.Parameter(weight.index_select(0, outputs).index_select(1, inputs))
         coordinates[name + '.weight'] = (outputs, inputs)
         if layer.bias is not None:
-            target.bias = nn.Parameter(layer.bias.detach().to(weight.device).index_select(0, outputs).clone())
+            target.bias = nn.Parameter(layer.bias.detach().to(weight.device).index_select(0, outputs))
             coordinates[name + '.bias'] = (outputs,)
         if isinstance(target, nn.Conv2d):
             target.in_channels, target.out_channels = len(inputs), len(outputs)
         else:
             target.in_features, target.out_features = len(inputs), len(outputs)
         previous, previous_layer = outputs, layer
+    if device is not None:
+        result.to(device)
     return result, coordinates
 
 

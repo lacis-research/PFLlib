@@ -9,6 +9,12 @@ class HERAFL(FedLoad):
     client_class = clientHERAFL
     bandit_class = LinUCBBandit
 
+    def __new__(cls, args, times):
+        if cls is HERAFL and getattr(args, 'hera_communication', 'parameters') == 'prototypes':
+            from flcore.servers.serverheraprototype import PrototypeHERAFL
+            return object.__new__(PrototypeHERAFL)
+        return object.__new__(cls)
+
     def __init__(self, args, times):
         from flcore.heterogeneity.semantic import SemanticLinUCB, Bank, wire_bytes
         from flcore.trainmodel.models import FedAvgCNN, DNN

@@ -11,6 +11,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 from comparison_metrics import render_reference_comparison
+from contribution_plots import render_contributions
 
 
 METRICS = {
@@ -65,11 +66,13 @@ def read_policy(path):
         if not clients:
             continue
         # All trained clients incur these costs, including rejected responses.
-        stats = [c['round_stats'] for c in clients]
+        stats = [c['round_stats'] for c in clients if c['round_stats']]
+        if not stats:
+            continue
         values['energy'][round_index] = sum(s['energy_consumption'] for s in stats)
         values['communication'][round_index] = sum(s['total_communication_bytes'] for s in stats) / 2**20
         values['client_time'][round_index] = max(s['round_time'] for s in stats)
-        values['retention'][round_index] = float(np.mean([c['retention'] for c in clients])) * 100
+        values['retention'][round_index] = float(np.mean([c['retention'] for c in clients if c.get('retention') is not None])) * 100
     return values
 
 
@@ -102,6 +105,7 @@ def main():
     parser.add_argument('--runs', type=int, nargs='+', help='Repetition indices; default: all matching files.')
     parser.add_argument('--eval-gap', type=int, default=1, help='The -eg value used for ALL compared experiments.')
     parser.add_argument('--output-dir', type=Path)
+    parser.add_argument('--accuracy-target', type=float, help='Optional common accuracy target in [0,1].')
     parser.add_argument('--formats', nargs='+', choices=['png'], default=['png'])
     parser.add_argument('--extra-metrics', action='store_true', help='Also generate the original loss/AUC and per-round resource plots.')
     args = parser.parse_args()
@@ -124,6 +128,9 @@ def main():
     metrics = {name: {} for name in METRICS}
     resources = {name: {} for name in RESOURCES}
     policy_runs = {}
+    contribution_runs = {}
+    evaluation_types = {}
+    variant_types = {}
     for algorithm in algorithms:
         prefix = f'{args.dataset}_{algorithm}_{args.goal}_'
         pattern = re.compile(re.escape(prefix) + r'(\d+)\.h5$')
@@ -134,6 +141,7 @@ def main():
                 matching.append((int(match[1]), path))
         latest = {}
         for run, path in matching:
+            accuracy = {}
             if run not in latest or path.stat().st_mtime > latest[run].stat().st_mtime:
                 latest[run] = path
         matching = sorted(latest.items())
@@ -148,11 +156,19 @@ def main():
         for run, path in matching:
             print(f'Reading {path}')
             with h5py.File(path, 'r') as stream:
+                evaluation_type = stream.attrs.get('evaluation_type', 'global_model')
+                variant = stream.attrs.get('variant', 'legacy')
+                if variant_types.setdefault(algorithm, variant) != variant:
+                    parser.error(f'{algorithm}: cannot mix distinct variants as repetitions.')
+                previous_type = evaluation_types.setdefault(algorithm, evaluation_type)
+                if previous_type != evaluation_type:
+                    parser.error(f'{algorithm}: cannot mix global and local evaluation runs.')
                 for name, (_, _, scale, _) in METRICS.items():
-                    if name not in stream:
+                    source_name = 'rs_local_test_acc' if name == 'rs_test_acc' and evaluation_type == 'local_models_sample_weighted' else name
+                    if source_name not in stream:
                         print(f'Notice: {path.name} has no {name}; skipping this metric.')
                         continue
-                    values = np.asarray(stream[name], dtype=float)
+                    values = np.asarray(stream[source_name], dtype=float)
                     if values.ndim != 1:
                         parser.error(f'{path.name}: invalid dimensions for {name}.')
                     if not len(values) or not np.isfinite(values).any():
@@ -164,15 +180,21 @@ def main():
                     series = {int(r): float(v * scale) for r, v in zip(rounds, values) if np.isfinite(v)}
                     metrics[name].setdefault(algorithm, []).append(series)
                     if name == 'rs_test_acc':
+                        accuracy = {r: v / 100 for r, v in series.items()}
                         lengths.append(len(values))
             policy_path = path.with_name(path.stem + '_policy.json')
+            reports = []
             if policy_path.exists():
                 policy_count += 1
                 with policy_path.open(encoding='utf-8') as stream:
-                    policy_runs.setdefault(algorithm, []).append((run, json.load(stream)))
+                    reports = json.load(stream)
+                    policy_runs.setdefault(algorithm, []).append((run, reports))
                 for name, series in read_policy(policy_path).items():
                     if series:
                         resources[name].setdefault(algorithm, []).append(series)
+            label = algorithm + (' (modelos locais)' if evaluation_type == 'local_models_sample_weighted' else ' (modelo global)')
+            contribution_runs.setdefault(label, []).append(
+                dict(id=f'run {run}', accuracy=accuracy, reports=reports, evaluation_type=evaluation_type))
         if lengths and len(set(lengths)) > 1:
             print(f'Notice: {algorithm} has unequal run lengths; each round uses available runs only.')
         if policy_count < len(matching):
@@ -181,7 +203,12 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     global_accuracy = {algorithm: [{r: v / 100 for r, v in series.items()} for series in runs]
                        for algorithm, runs in metrics['rs_test_acc'].items()}
-    render_reference_comparison(global_accuracy, policy_runs, output / 'plots', args.formats)
+    render_reference_comparison(global_accuracy, policy_runs, output / 'plots', args.formats,
+                                evaluation_types=evaluation_types)
+    if 'local_models_sample_weighted' in evaluation_types.values():
+        draw({a + (' (modelos locais)' if evaluation_types[a] == 'local_models_sample_weighted' else ' (modelo global)'): reps for a, reps in metrics['rs_test_acc'].items()},
+             'Acurácia ponderada nas partições de teste — protocolos distintos', '%', output / 'test_accuracy_by_protocol', args.formats)
+    render_contributions(contribution_runs, output / 'plots', args.formats, accuracy_target=args.accuracy_target)
     if not args.extra_metrics:
         print('Resources and mean client accuracy require policy JSON; missing methods are omitted.')
         print('Total round time sums client times; it is not process wall-clock time.')

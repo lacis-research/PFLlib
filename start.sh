@@ -26,18 +26,27 @@ conda activate pfllib
 # Usa o Python do ambiente ativado, salvo sobrescrita explícita.
 PYTHON="${PYTHON:-python}"
 DATASET="${DATASET:-cifar10}"
-SCENARIO="${SCENARIO:-iid}"
+SCENARIO="${SCENARIO:-noniid}"
 NUM_ROUNDS="${NUM_ROUNDS:-50}"
-NUM_CLIENTS="${NUM_CLIENTS:-30}" # vazio: usa config.json existente ou o padrão do gerador
-SELECTION_FRACTION="${SELECTION_FRACTION:-0.2}"
+NUM_CLIENTS="${NUM_CLIENTS:-20}" # vazio: usa config.json existente ou o padrão do gerador
+SELECTION_FRACTION="${SELECTION_FRACTION:-0.3}"
 LOCAL_EPOCHS="${LOCAL_EPOCHS:-5}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
 MODEL="${MODEL:-VGG11}" # use MODEL=VGG16 ./start.sh para o experimento com VGG16
 DEVICE="${DEVICE:-cuda}" # main.py usa CPU se CUDA não estiver disponível
 DEVICE_ID="${DEVICE_ID:-0}"
 GOAL="${GOAL:-start-$(date +%Y%m%d-%H%M%S)-$$}"
-ALGORITHMS="${ALGORITHMS:-HERAFL FedLoad FedAvg}"
+ALGORITHMS="${ALGORITHMS:-HERAFL FedLoad}" #-HERAFL FedLoad FedAvg
 HERA_SEMANTIC_POLICY="${HERA_SEMANTIC_POLICY:-linucb}" # linucb, heuristic ou legacy (controle preservado)
+HERA_COMMUNICATION="${HERA_COMMUNICATION:-prototypes}" # parameters preserva o controle anterior
+# Protótipos: cache e checkpoints são removidos após salvar resultados/gráficos.
+# Para guardar pesos para retomada: ALGORITHMS=HERAFL ./start.sh --hera-keep-checkpoints
+HERA_PROTOTYPE_KIND="${HERA_PROTOTYPE_KIND:-simple}" # simple ou relational
+HERA_PROTOTYPE_POLICY="${HERA_PROTOTYPE_POLICY:-resources}" # resources ou semantic
+HERA_ALIGN_WEIGHT="${HERA_ALIGN_WEIGHT:-1}"
+HERA_RPCL_WEIGHT="${HERA_RPCL_WEIGHT:-1}"
+HERA_CPDR_WEIGHT="${HERA_CPDR_WEIGHT:-1}"
+REWARD_VALIDATION_FRACTION="${REWARD_VALIDATION_FRACTION:-0.2}"
 BALANCE="${BALANCE:-balance}"
 PARTITION="${PARTITION:-dir}"
 COMPARE="${COMPARE:-1}"
@@ -110,6 +119,18 @@ for algorithm in "${algorithms[@]}"; do
             CNN|DNN|VGG11|VGG16) ;;
             *) echo "HERAFL semântico requer MODEL=CNN, DNN, VGG11 ou VGG16." >&2; exit 1 ;;
         esac
+        case "$HERA_COMMUNICATION" in
+            parameters|prototypes) ;;
+            *) echo "HERA_COMMUNICATION deve ser parameters ou prototypes." >&2; exit 1 ;;
+        esac
+        case "$HERA_PROTOTYPE_KIND" in
+            simple|relational) ;;
+            *) echo "HERA_PROTOTYPE_KIND deve ser simple ou relational." >&2; exit 1 ;;
+        esac
+        case "$HERA_PROTOTYPE_POLICY" in
+            resources|semantic) ;;
+            *) echo "HERA_PROTOTYPE_POLICY deve ser resources ou semantic." >&2; exit 1 ;;
+        esac
         case "$HERA_SEMANTIC_POLICY" in
             linucb|heuristic|legacy) ;;
             *) echo "HERA_SEMANTIC_POLICY deve ser linucb, heuristic ou legacy." >&2; exit 1 ;;
@@ -133,6 +154,7 @@ common_args=(
     -lr "$LEARNING_RATE" --policy-seed "$POLICY_SEED"
     --resource-preset "$RESOURCE_PRESET" --experiment-id "${GOAL}_${MODEL}"
     --aligned-comparison --pruning-round-timeout "$ROUND_TIMEOUT"
+    --reward-validation-fraction "$REWARD_VALIDATION_FRACTION"
     --pruning-arms "${pruning_arms[@]}"
     --bandit-alpha "$BANDIT_ALPHA" --bandit-beta "$BANDIT_BETA"
     --reward-weights "${reward_weights[@]}"
@@ -150,7 +172,16 @@ for algorithm in "${algorithms[@]}"; do
     if [[ "$algorithm" == "FedAvg" ]]; then
         algorithm_args+=(--record-resources)
     elif [[ "$algorithm" == "HERAFL" ]]; then
-        algorithm_args+=(--hera-semantic --hera-semantic-policy "$HERA_SEMANTIC_POLICY")
+        algorithm_args+=(--hera-semantic --hera-semantic-policy "$HERA_SEMANTIC_POLICY"
+                          --hera-communication "$HERA_COMMUNICATION")
+        if [[ "$HERA_COMMUNICATION" == "prototypes" ]]; then
+            algorithm_args+=(--hera-prototype-kind "$HERA_PROTOTYPE_KIND"
+                              --hera-prototype-policy "$HERA_PROTOTYPE_POLICY"
+                              --hera-align-weight "$HERA_ALIGN_WEIGHT")
+            if [[ "$HERA_PROTOTYPE_KIND" == "relational" ]]; then
+                algorithm_args+=(--hera-rpcl-weight "$HERA_RPCL_WEIGHT" --hera-cpdr-weight "$HERA_CPDR_WEIGHT")
+            fi
+        fi
     fi
     "$PYTHON" main.py "${common_args[@]}" "${algorithm_args[@]}" -algo "$algorithm" \
         "$@"

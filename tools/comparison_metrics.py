@@ -38,17 +38,23 @@ def mean_accuracy(reports):
     return result
 
 
-def experiment_total(reports, metric):
+def experiment_total(reports, metric, include_all=False):
+    if include_all:
+        initialization = {'round_time': 'initialization_time', 'energy_consumption': 'initialization_energy', 'total_communication_bytes': 'initialization_bytes'}[metric]
+        evaluation = {'round_time': 'evaluation_total_time', 'energy_consumption': 'evaluation_energy', 'total_communication_bytes': 'evaluation_telemetry_bytes'}[metric]
+        return sum(sum(c['round_stats'][metric] for c in r['clients'] if c.get('round_stats'))
+                   + r.get(initialization, 0) + r.get(evaluation, 0) for r in reports)
     return sum(c['round_stats'][metric] for r in reports for c in r['clients'] if c.get('status', 'accepted') == 'accepted')
 
 
-def draw_lines(data, output, filename, title, ylabel, formats):
+def draw_lines(data, output, filename, title, ylabel, formats, labels=None):
     if not data:
         print(f'Notice: no data for {filename}.')
         return
     fig, ax = plt.subplots(figsize=(12, 6.5))
     for algorithm, repetitions in data.items():
         label, color, marker, linestyle = style(algorithm)
+        label = (labels or {}).get(algorithm, label)
         rounds = sorted({r for series in repetitions for r in series})
         values = [[series[r] for series in repetitions if r in series] for r in rounds]
         mean, std = [np.mean(v) for v in values], [np.std(v) for v in values]
@@ -62,9 +68,9 @@ def draw_lines(data, output, filename, title, ylabel, formats):
     save(fig, output, filename, formats)
 
 
-def draw_totals(policy_runs, output, formats):
+def draw_totals(policy_runs, output, formats, include_all=False):
     for metric, (filename, title, unit) in TOTAL_METRICS.items():
-        entries = [(algorithm, [experiment_total(reports, metric) for _, reports in runs])
+        entries = [(algorithm, [experiment_total(reports, metric, include_all) for _, reports in runs])
                    for algorithm, runs in policy_runs.items() if runs]
         if not entries:
             continue
@@ -129,8 +135,12 @@ def draw_capacity(policy_runs, output, formats):
     save(fig, output, 'client_round_compute_capacity_pruning_bubble_comparison', formats)
 
 
-def render_reference_comparison(global_accuracy, policy_runs, output, formats):
+def render_reference_comparison(global_accuracy, policy_runs, output, formats, evaluation_types=None):
     output.mkdir(parents=True, exist_ok=True)
+    evaluation_types = evaluation_types or {}
+    has_local = 'local_models_sample_weighted' in evaluation_types.values()
+    labels = {a: style(a)[0] + (' (modelos locais)' if evaluation_types.get(a) == 'local_models_sample_weighted' else ' (modelo global)')
+              for a in global_accuracy} if has_local else None
     local_accuracy = {}
     for algorithm, runs in policy_runs.items():
         series = [mean_accuracy(reports) for _, reports in runs]
@@ -140,6 +150,7 @@ def render_reference_comparison(global_accuracy, policy_runs, output, formats):
     draw_lines(local_accuracy, output, 'mean_accuracy_per_round_comparison',
                'Mean Accuracy Per Round Comparison', 'Mean Accuracy (fraction, 0–1)', formats)
     draw_lines(global_accuracy, output, 'global_accuracy_per_round_comparison',
-               'Global Accuracy Per Round Comparison', 'Global Accuracy (fraction, 0–1)', formats)
+               'Test Accuracy Per Round Comparison — modelos locais/globais' if has_local else 'Global Accuracy Per Round Comparison',
+               'Sample-weighted Test Accuracy (fraction, 0–1)' if has_local else 'Global Accuracy (fraction, 0–1)', formats, labels=labels)
     draw_capacity(policy_runs, output, formats)
-    draw_totals(policy_runs, output, formats)
+    draw_totals(policy_runs, output, formats, include_all=has_local)

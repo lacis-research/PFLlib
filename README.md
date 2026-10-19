@@ -34,6 +34,8 @@ Figure 1: An Example for FedAvg. You can create a scenario using `generate_DATA.
 ```
 ### FedLoad e HERAFL
 
+**HeraFL atual:** [documentação completa do algoritmo](docs/herafl.md) — protocolos, equações, configuração, avaliação, memória, checkpoints e gráficos.
+
 Adaptações nativas dos algoritmos de `mininetfed_iwcmc`, usando servidores, clientes, modelos e dados do PFLlib: [execução, perfis de recursos e limitações](docs/heterogeneous_algorithms.md).
 
 ### Key Features
@@ -480,6 +482,8 @@ Here are the relevant papers for your reference:
 
 ## FedLoad e HeraFL com os datasets nativos do PFLlib
 
+> Esta seção reúne instruções históricas. Seleção estratificada, preditor e pisos de retenção descritos abaixo não fazem parte do fluxo HeraFL atual. Para opções e comandos atuais, use a [documentação do HeraFL](docs/herafl.md).
+
 FedLoad e HERAFL usam os geradores existentes em `dataset/`, como
 `generate_MNIST.py`, `generate_Cifar10.py` e `generate_Cifar100.py`.
 IID/non-IID, balanceamento, distribuição de rótulos, normalização e separação
@@ -665,27 +669,12 @@ Gráficos usam somente PNG. Os resultados antigos sob `legacy` não foram
 recalculados. Validação: `python -m unittest discover -s tests -v`.
 
 
-### HERAFL: piso de retenção e contexto consistente
+### HERAFL: política atual de retenção
 
-O HERAFL restringe os braços pela capacidade computacional estática
-`(static_cpu_capacity + 1 - static_compute_cost) / 2`, calculada a partir do
-contexto inicial, antes do treinamento. Clientes com capacidade >= 0,70 usam
-retenção >= 0,85; clientes com capacidade >= 0,40 usam retenção >= 0,70.
-Os demais mantêm todos os braços disponíveis. A retenção representa a fração
-preservada dos canais/neurônios ocultos, não a fração total de parâmetros.
+A implementação atual seleciona clientes uniformemente e escolhe retenções com
+LinUCB de recursos ou contexto semântico opcional. Os filtros opcionais usam
+estimativas de memória e tempo. Os antigos pisos por capacidade e o preditor não
+integram esse caminho de execução; suas flags antigas não devem ser usadas.
 
-Os limites podem ser ajustados sem alterar FedLoad/FedAvg:
-
-```bash
-./start.sh --hera-retention-floors 0.70 0.85 --hera-capacity-thresholds 0.40 0.70
-```
-
-A política escolhe somente braços configurados que atendem ao piso. Se o maior
-braço estiver abaixo do piso, utiliza esse braço e registra
-`retention_floor_satisfied=false` em `alpha_info` no relatório da política.
-Para desativar apenas o piso em uma ablação, use `--hera-retention-floors 0 0`.
-
-A atualização do LinUCB e do preditor do HERAFL recebe o mesmo contexto usado na
-escolha. As métricas observadas continuam fornecendo a recompensa e o alvo do
-preditor. Os relatórios JSON preservam `selection_context`, `learning_context`
-e o contexto observado; o `config.json` salva pisos e limiares utilizados.
+Consulte a [documentação completa](docs/herafl.md), em especial a política de
+retenção/recompensa e a diferença entre os protocolos de parâmetros e protótipos.
