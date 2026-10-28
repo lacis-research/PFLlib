@@ -1,12 +1,13 @@
 """Comparison recovery must use a shared goal, never mix experiment sessions."""
 import os
+import json
 from pathlib import Path
 import sys
 import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
-from plot_comparison import latest_common_goal
+from plot_comparison import latest_common_goal, comparison_directory_name
 
 
 class ComparisonDiscoveryTests(unittest.TestCase):
@@ -40,6 +41,18 @@ class ComparisonDiscoveryTests(unittest.TestCase):
         self.add('HERAFL', 'two-methods', 100)
         self.add('FedLoad', 'two-methods', 101)
         self.assertEqual(latest_common_goal(self.root, 'MNIST', ['HERAFL', 'FedLoad']), 'two-methods')
+
+    def test_folder_name_uses_saved_scenario_and_model(self):
+        source = self.root/'metrics.h5'
+        (self.root/'config.json').write_text(json.dumps(dict(
+            model='VGG11', training_config=dict(scenario='iid'),
+            partition_metadata=dict(non_iid=True))))
+        self.assertEqual(comparison_directory_name(['HERAFL', 'FedLoad'], 'Cifar10', 'start-123', [source]),
+                         'HERAFL__vs__FedLoad_Cifar10_non-iid_VGG11_start-123')
+
+    def test_missing_metadata_is_explicit(self):
+        self.assertIn('scenario-unknown_model-unknown',
+                      comparison_directory_name(['HERAFL'], 'MNIST', 'test', [self.root/'metrics.h5']))
 
 
 if __name__ == '__main__':

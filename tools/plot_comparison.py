@@ -10,7 +10,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
-from comparison_metrics import render_reference_comparison
+from comparison_metrics import render_reference_comparison, style
 from contribution_plots import render_contributions
 
 
@@ -18,6 +18,8 @@ METRICS = {
     'rs_test_acc': ('accuracy', 'Acurácia de teste', 100.0, '%'),
     'rs_test_auc': ('auc', 'AUC de teste', 1.0, 'AUC'),
     'rs_train_loss': ('train_loss', 'Perda de treino', 1.0, 'Perda'),
+    'rs_test_acc_std': ('test_accuracy_std', 'Desvio padrão da acurácia entre clientes', 100.0, 'p.p.'),
+    'rs_test_auc_std': ('test_auc_std', 'Desvio padrão da AUC entre clientes', 1.0, 'AUC'),
 }
 RESOURCES = {
     'energy': ('Energia estimada total por rodada', 'J'),
@@ -42,7 +44,7 @@ def draw(data, title, ylabel, output, formats):
     fig, ax = plt.subplots(figsize=(8, 4.8))
     for algorithm, repetitions in data.items():
         rounds, mean, std = summarize(repetitions)
-        line, = ax.plot(rounds, mean, label=f'{algorithm} (n={len(repetitions)})', linewidth=2)
+        line, = ax.plot(rounds, mean, label=f'{algorithm} (n={len(repetitions)})', linewidth=2, color=style(algorithm)[1])
         if len(repetitions) > 1:
             ax.fill_between(rounds, mean - std, mean + std, color=line.get_color(), alpha=0.16)
     ax.set(title=title, xlabel='Rodada', ylabel=ylabel)
@@ -54,6 +56,28 @@ def draw(data, title, ylabel, output, formats):
         fig.savefig(target, dpi=180)
         print(target)
     plt.close(fig)
+
+
+def render_experiment_metrics(path, output):
+    """Render the five framework evaluation metrics for a saved run."""
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=True)
+    with h5py.File(path, 'r') as stream:
+        local = stream.attrs.get('evaluation_type') == 'local_models_sample_weighted'
+        label = 'Modelos locais' if local else 'Modelo global'
+        method = re.search(r'_(HERAFL|FedLoad|FedAvg)_', Path(path).stem)
+        if method:
+            label = method[1] + ' — ' + label
+        for name, (filename, title, scale, unit) in METRICS.items():
+            source = 'rs_local_test_acc' if local and name == 'rs_test_acc' else name
+            if source not in stream or not len(stream[source]):
+                continue
+            values = np.asarray(stream[source], dtype=float)
+            if 'eval_rounds' not in stream or len(stream['eval_rounds']) != len(values):
+                continue
+            series = {int(r): float(v*scale) for r, v in zip(stream['eval_rounds'], values) if np.isfinite(v)}
+            if series:
+                draw({label: [series]}, title, unit, output / filename, ['png'])
 
 
 def read_policy(path):
@@ -94,6 +118,30 @@ def latest_common_goal(results_dir, dataset, algorithms):
     return max(common, key=lambda goal: max(goals[goal] for goals in timestamps.values()))
 
 
+def comparison_directory_name(algorithms, dataset, goal, sources):
+    """Use saved experiment metadata, including for --compare-only recovery."""
+    scenarios, models = set(), set()
+    for source in sources:
+        config = source.parent / 'config.json'
+        if not config.exists():
+            continue
+        metadata = json.loads(config.read_text())
+        training = metadata.get('training_config') or {}
+        partition = metadata.get('partition_metadata') or {}
+        scenario = training.get('scenario') or metadata.get('scenario')
+        if 'non_iid' in partition:
+            scenario = 'non-iid' if partition['non_iid'] else 'iid'
+        if scenario:
+            scenarios.add(str(scenario).replace('non_iid', 'non-iid').replace('noniid', 'non-iid'))
+        model = metadata.get('model')
+        if model:
+            models.add(str(model))
+    safe = lambda value: re.sub(r'[^a-zA-Z0-9_.-]', '_', value)
+    scenario = '+'.join(sorted(scenarios)) or 'scenario-unknown'
+    model = '+'.join(sorted(models)) or 'model-unknown'
+    return '__vs__'.join(algorithms) + f'_{safe(dataset)}_{safe(scenario)}_{safe(model)}_{safe(goal)}'
+
+
 def main():
     root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
@@ -131,6 +179,7 @@ def main():
     contribution_runs = {}
     evaluation_types = {}
     variant_types = {}
+    sources = []
     for algorithm in algorithms:
         prefix = f'{args.dataset}_{algorithm}_{args.goal}_'
         pattern = re.compile(re.escape(prefix) + r'(\d+)\.h5$')
@@ -141,6 +190,7 @@ def main():
                 matching.append((int(match[1]), path))
         latest = {}
         for run, path in matching:
+            sources.append(path)
             accuracy = {}
             if run not in latest or path.stat().st_mtime > latest[run].stat().st_mtime:
                 latest[run] = path
@@ -199,7 +249,7 @@ def main():
             print(f'Notice: {algorithm} has unequal run lengths; each round uses available runs only.')
         if policy_count < len(matching):
             print(f'Notice: {algorithm}: resource logs available for {policy_count}/{len(matching)} runs.')
-    output = args.output_dir or args.results_dir / 'comparison' / ('__vs__'.join(algorithms) + f'_{args.dataset}_{args.goal}')
+    output = args.output_dir or args.results_dir / 'comparison' / comparison_directory_name(algorithms, args.dataset, args.goal, sources)
     output.mkdir(parents=True, exist_ok=True)
     global_accuracy = {algorithm: [{r: v / 100 for r, v in series.items()} for series in runs]
                        for algorithm, runs in metrics['rs_test_acc'].items()}
@@ -209,13 +259,15 @@ def main():
         draw({a + (' (modelos locais)' if evaluation_types[a] == 'local_models_sample_weighted' else ' (modelo global)'): reps for a, reps in metrics['rs_test_acc'].items()},
              'Acurácia ponderada nas partições de teste — protocolos distintos', '%', output / 'test_accuracy_by_protocol', args.formats)
     render_contributions(contribution_runs, output / 'plots', args.formats, accuracy_target=args.accuracy_target)
+    for name, (filename, title, _, unit) in METRICS.items():
+        if metrics[name]:
+            labeled = {a + (' (modelos locais)' if evaluation_types[a] == 'local_models_sample_weighted' else ' (modelo global)'): reps
+                       for a, reps in metrics[name].items()}
+            draw(labeled, f'{args.dataset} — {title}', unit, output / 'plots' / filename, args.formats)
     if not args.extra_metrics:
         print('Resources and mean client accuracy require policy JSON; missing methods are omitted.')
         print('Total round time sums client times; it is not process wall-clock time.')
         return
-    for name, (filename, title, _, unit) in METRICS.items():
-        if metrics[name]:
-            draw(metrics[name], f'{args.dataset} — {title}', unit, output / filename, args.formats)
     for name, (title, unit) in RESOURCES.items():
         if resources[name]:
             draw(resources[name], f'{args.dataset} — {title}', unit, output / name, args.formats)

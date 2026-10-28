@@ -180,10 +180,22 @@ class Server(object):
             print("File path: " + file_path)
 
             with h5py.File(file_path, 'w') as hf:
+                if self.algorithm in ('HERAFL', 'FedLoad', 'FedAvg'):
+                    hf.attrs['evaluation_type'] = 'global_model'
+                if self.algorithm == 'HERAFL':
+                    hf.attrs['variant'] = f'global-prototype-alignment-v1:weight={getattr(self, "global_align_weight", 0.)}'
                 hf.create_dataset('rs_test_acc', data=self.rs_test_acc)
                 hf.create_dataset('eval_rounds', data=np.arange(1, len(self.rs_test_acc) + 1) * self.eval_gap if getattr(self, 'aligned_comparison', False) or self.algorithm in ('FedLoad', 'HERAFL') else np.arange(len(self.rs_test_acc)) * self.eval_gap)
                 hf.create_dataset('rs_test_auc', data=self.rs_test_auc)
                 hf.create_dataset('rs_train_loss', data=self.rs_train_loss)
+                for name in ('rs_test_acc_std', 'rs_test_auc_std'):
+                    hf.create_dataset(name, data=getattr(self, name, []))
+
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'tools'))
+            from plot_comparison import render_experiment_metrics
+            render_experiment_metrics(file_path, Path(result_path) / 'plots')
 
     def save_item(self, item, item_name):
         if not os.path.exists(self.save_folder_name):
@@ -236,6 +248,11 @@ class Server(object):
         train_loss = sum(stats_train[2])*1.0 / sum(stats_train[1])
         accs = [a / n for a, n in zip(stats[2], stats[1])]
         aucs = [a / n for a, n in zip(stats[3], stats[1])]
+        self.rs_test_auc.append(test_auc)
+        for name, value in (('rs_test_acc_std', np.std(accs)), ('rs_test_auc_std', np.std(aucs))):
+            if not hasattr(self, name):
+                setattr(self, name, [])
+            getattr(self, name).append(value)
         
         if acc == None:
             self.rs_test_acc.append(test_acc)

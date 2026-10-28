@@ -1,11 +1,35 @@
-"""HERAFL training with optional post-training, deterministic semantic summaries."""
+"""Global HERAFL: prototype-regularized training and semantic summaries."""
 import time
+import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from flcore.clients.clientfedload import clientFedLoad
 from flcore.heterogeneity.semantic import extract, wire_bytes
 
 
 class clientHERAFL(clientFedLoad):
+    def training_loss(self, x, y):
+        reference = getattr(self, 'alignment_targets', {})
+        if not reference:
+            return super().training_loss(x, y)
+        logits, features = self.model.forward_with_features(x)
+        labels = [label for label in y.unique().tolist() if label in reference]
+        if not labels:
+            return self.loss(logits, y)
+        mask = torch.zeros_like(y, dtype=torch.bool)
+        targets = torch.zeros_like(features)
+        for label in labels:
+            selected = y == label
+            mask |= selected
+            targets[selected] = reference[label]
+        # Mean normalized squared distance, summed over feature coordinates.
+        # Its scale is independent of the representation dimension.
+        alignment = (F.normalize(features[mask], dim=1)-targets[mask]).square().sum(1).mean()
+        samples = int(mask.sum())
+        self.alignment_sum += alignment.detach().item()*samples
+        self.alignment_samples += samples
+        return self.loss(logits, y) + self.global_align_weight*alignment
+
     def record_resources(self, compute_time):
         super().record_resources(compute_time)
         indices = getattr(self.model, 'semantic_input_indices', None)
@@ -25,7 +49,16 @@ class clientHERAFL(clientFedLoad):
         stats['total_communication_bytes'] += size
 
     def train(self):
-        super().train()
+        self.alignment_sum, self.alignment_samples = 0., 0
+        weight = getattr(self, 'global_align_weight', 0.)
+        self.alignment_targets = {
+            label: F.normalize(vector.detach().to(self.device), dim=0)
+            for label, vector in getattr(getattr(self, 'semantic_snapshot', None), 'prototypes', {}).items()
+            if weight and vector.norm() > 1e-12}
+        try:
+            super().train()
+        finally:
+            self.alignment_targets = {}
         if not getattr(self, 'semantic_collect', False):
             return
         self._synchronize()
@@ -43,6 +76,9 @@ class clientHERAFL(clientFedLoad):
         stats = self.round_stats
         down, up = wire_bytes(self.semantic_snapshot), wire_bytes(self.semantic_payload)
         stats.update(training_time=training_time, semantic_extraction_time=duration,
+                     prototype_alignment_weight=weight,
+                     prototype_alignment_loss=self.alignment_sum/max(self.alignment_samples, 1),
+                     prototype_alignment_samples=self.alignment_samples,
                      parameter_download_bytes=stats['download_bytes']-stats.get('coordinate_download_bytes', 0), parameter_upload_bytes=stats['upload_bytes'],
                      semantic_download_bytes=down, semantic_upload_bytes=up,
                      semantic_indicators=self.semantic_payload.indicators,

@@ -9,7 +9,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
-from comparison_metrics import save
+from comparison_metrics import save, style
 
 COSTS = {
     'round_time': ('Tempo acumulado dos clientes (s; medido + transferência estimada)', 1),
@@ -42,7 +42,7 @@ def draw_cost_accuracy(runs, output, formats):
         fig, ax = plt.subplots(figsize=(9, 5))
         count = 0
         for name, repetitions in runs.items():
-            color = None
+            color = style(name)[1]
             for run in repetitions:
                 costs = cumulative_cost(run['reports'], metric)
                 rounds = sorted(set(costs) & set(run['accuracy']))
@@ -181,7 +181,7 @@ def draw_ablations(runs, output, formats):
                     values.append(value)
                     rows.append(dict(variant=name, run=run['id'], round=final, metric=metric, value=value))
             if values:
-                ax.scatter([i]*len(values), values, alpha=.5)
+                ax.scatter([i]*len(values), values, alpha=.5, color=style(name)[1])
                 ax.errorbar(i, np.mean(values), yerr=np.std(values), fmt='D', color='black', capsize=4)
                 ax.annotate(f'n={len(values)}', (i, np.mean(values)), xytext=(5, 5), textcoords='offset points', fontsize=8)
         ax.set(xticks=range(len(runs)), xticklabels=list(runs), ylabel=label)
@@ -209,9 +209,14 @@ def draw_client_distribution(runs, output, formats):
     if not entries:
         return
     fig, ax = plt.subplots(figsize=(max(9, len(entries)*1.4), 5))
-    ax.boxplot([v for _, v in entries])
-    for i, (_, values) in enumerate(entries, 1):
-        ax.scatter(np.full(len(values), i), values, alpha=.4, s=12)
+    boxes = ax.boxplot([v for _, v in entries], patch_artist=True)
+    for box, (name, _) in zip(boxes['boxes'], entries):
+        color = style(name)[1]
+        if color:
+            box.set_facecolor(color)
+            box.set_alpha(.3)
+    for i, (name, values) in enumerate(entries, 1):
+        ax.scatter(np.full(len(values), i), values, alpha=.4, s=12, color=style(name)[1])
     ax.set(xticks=range(1, len(entries)+1), xticklabels=[k for k, _ in entries],
            ylabel='Acurácia por cliente (%)', title='Distribuição na última avaliação disponível de cada execução')
     ax.tick_params(axis='x', labelrotation=20)
@@ -233,7 +238,7 @@ def draw_target_cost(runs, output, formats, target):
             r = reached[0] if reached else None
             value = cumulative_cost(run['reports'], metric).get(r) if r is not None else None
             if value is not None:
-                ax.bar(i, value/scale)
+                ax.bar(i, value/scale, color=style(name)[1])
             else:
                 ax.text(i, .02, 'Não atingiu' if r is None else 'Custo ausente',
                         transform=ax.get_xaxis_transform(), rotation=90, va='bottom', ha='center', fontsize=8)

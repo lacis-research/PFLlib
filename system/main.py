@@ -531,10 +531,11 @@ if __name__ == "__main__":
     parser.add_argument('--hera-prototype-kind', choices=['simple', 'relational'], default='simple')
     parser.add_argument('--hera-prototype-policy', choices=['resources', 'semantic'], default='resources')
     parser.add_argument('--hera-align-weight', type=float, default=1.)
+    parser.add_argument('--hera-global-align-weight', type=float, default=0., help='Normalized prototype alignment weight with parameter aggregation; requires --hera-semantic. Zero disables regularization.')
     parser.add_argument('--hera-local-only', action='store_true', help='Independent client bandits and no learning communication after initialization.')
     parser.add_argument('--hera-checkpoint-every', type=int, default=0, help='Prototype checkpoint interval; 0 disables periodic saves. Removed after successful export unless --hera-keep-checkpoints.')
     parser.add_argument('--hera-keep-checkpoints', action='store_true', help='Keep periodic checkpoints and save a final checkpoint after export; otherwise remove training state after metrics/plots are saved.')
-    parser.add_argument('--hera-client-storage', choices=['disk', 'memory'], default='disk', help='Store inactive prototype clients on disk to bound RAM use.')
+    parser.add_argument('--hera-client-storage', choices=['disk', 'memory'], default='memory', help='Keep prototype client states in CPU RAM; use disk to offload inactive clients.')
     parser.add_argument('--hera-state-dir', help='Parent directory for temporary client states; defaults to workspace tmp/.')
     parser.add_argument('--hera-resume', help='Trusted local prototype checkpoint directory.')
     parser.add_argument('--hera-semantic-features', default='H,U,D,Q')
@@ -592,6 +593,8 @@ if __name__ == "__main__":
         parser.error('--hera-resume requires prototype communication.')
     if args.hera_semantic and args.algorithm != 'HERAFL':
         parser.error('--hera-semantic requires HERAFL.')
+    if args.hera_global_align_weight and (args.algorithm != 'HERAFL' or args.hera_communication != 'parameters' or not args.hera_semantic):
+        parser.error('--hera-global-align-weight requires HERAFL, parameter communication and --hera-semantic.')
     if args.reward_validation_fraction and not (args.aligned_comparison or args.algorithm in ('FedLoad', 'HERAFL')):
         parser.error('--reward-validation-fraction requires the aligned comparison protocol.')
 

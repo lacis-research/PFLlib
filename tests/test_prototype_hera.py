@@ -46,6 +46,23 @@ class PrototypeTests(unittest.TestCase):
             server.train()
         return server
 
+    def test_default_storage_trains_without_disk_state_io(self):
+        with self.environment() as tmp:
+            args = self.args(global_rounds=2, join_ratio=1., hera_keep_checkpoints=False)
+            del args.hera_client_storage
+            with patch('torch.save', side_effect=AssertionError('state write')), \
+                 patch('torch.load', side_effect=AssertionError('state read')):
+                server = self.run_training(args, tmp)
+            self.assertEqual(server.client_storage, 'memory')
+            self.assertIsNone(server.state_directory)
+            self.assertTrue(server.reference['prototypes'])
+            self.assertEqual(server.eval_rounds, [1, 2])
+            for client in server.clients:
+                self.assertIsNone(client.state_path)
+                self.assertIsNotNone(client.model)
+                self.assertEqual(client.master.fc.weight.device.type, 'cpu')
+                self.assertEqual(client.trained_rounds, 2)
+
     def test_protocol_persistence_pruning_and_local_evaluation(self):
         with self.environment() as tmp:
             args = self.args(join_ratio=1.)
@@ -399,7 +416,12 @@ class PrototypeTests(unittest.TestCase):
             with h5py.File(next(tmp.glob('*.h5'))) as f:
                 self.assertIn('rs_local_test_acc', f)
                 self.assertNotIn('rs_test_acc', f)
+                for name, key in (('rs_train_loss', 'train_loss'), ('rs_test_auc', 'test_auc'),
+                                  ('rs_test_acc_std', 'test_client_std'), ('rs_test_auc_std', 'test_auc_std')):
+                    np.testing.assert_allclose(f[name][:], [server.round_reports[0][key]])
             self.assertGreater(len(list((tmp/'plots').glob('*.png'))), 3)
+            for name in ('accuracy', 'auc', 'train_loss', 'test_accuracy_std', 'test_auc_std'):
+                self.assertTrue((tmp/'plots'/f'{name}.png').exists(), name)
             for name in ('global_accuracy_per_round_comparison', 'total_communication_per_experiment_comparison',
                          'total_energy_per_experiment_comparison', 'total_round_time_per_experiment_comparison'):
                 self.assertTrue((tmp/'plots'/f'{name}.png').exists(), name)

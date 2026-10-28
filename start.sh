@@ -25,23 +25,25 @@ conda activate pfllib
 
 # Usa o Python do ambiente ativado, salvo sobrescrita explícita.
 PYTHON="${PYTHON:-python}"
-DATASET="${DATASET:-cifar10}"
+DATASET="${DATASET:-Cifar10}" # MNIST, Cifar10, Cifar100, Cinic10, FashionMNIST
 SCENARIO="${SCENARIO:-noniid}"
-NUM_ROUNDS="${NUM_ROUNDS:-50}"
+NUM_ROUNDS="${NUM_ROUNDS:-30}"
 NUM_CLIENTS="${NUM_CLIENTS:-20}" # vazio: usa config.json existente ou o padrão do gerador
-SELECTION_FRACTION="${SELECTION_FRACTION:-0.3}"
-LOCAL_EPOCHS="${LOCAL_EPOCHS:-5}"
+SELECTION_FRACTION="${SELECTION_FRACTION:-.3}"
+LOCAL_EPOCHS="${LOCAL_EPOCHS:-10}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
-MODEL="${MODEL:-VGG11}" # use MODEL=VGG16 ./start.sh para o experimento com VGG16
+MODEL="${MODEL:-CNN}" # use MODEL=VGG16 ./start.sh para o experimento com VGG16
 DEVICE="${DEVICE:-cuda}" # main.py usa CPU se CUDA não estiver disponível
 DEVICE_ID="${DEVICE_ID:-0}"
 GOAL="${GOAL:-start-$(date +%Y%m%d-%H%M%S)-$$}"
-ALGORITHMS="${ALGORITHMS:-HERAFL FedLoad}" #-HERAFL FedLoad FedAvg
+ALGORITHMS="${ALGORITHMS:-HERAFL FedLoad FedAvg}" #-HERAFL FedLoad FedAvg
 HERA_SEMANTIC_POLICY="${HERA_SEMANTIC_POLICY:-linucb}" # linucb, heuristic ou legacy (controle preservado)
-HERA_COMMUNICATION="${HERA_COMMUNICATION:-prototypes}" # parameters preserva o controle anterior
+HERA_COMMUNICATION="${HERA_COMMUNICATION:-parameters}" # modelo global agregado e protótipos como regularização
+HERA_GLOBAL_ALIGN_WEIGHT="${HERA_GLOBAL_ALIGN_WEIGHT:-1}" # 0: ablação sem regularização por protótipos
+HERA_CLIENT_STORAGE="${HERA_CLIENT_STORAGE:-memory}" # estados locais na RAM da CPU; disk reduz o consumo de RAM
 # Protótipos: cache e checkpoints são removidos após salvar resultados/gráficos.
-# Para guardar pesos para retomada: ALGORITHMS=HERAFL ./start.sh --hera-keep-checkpoints
-HERA_PROTOTYPE_KIND="${HERA_PROTOTYPE_KIND:-simple}" # simple ou relational
+# Retomada da variante local: HERA_COMMUNICATION=prototypes ALGORITHMS=HERAFL ./start.sh --hera-keep-checkpoints
+HERA_PROTOTYPE_KIND="${HERA_PROTOTYPE_KIND:-relational}" # simple ou relational
 HERA_PROTOTYPE_POLICY="${HERA_PROTOTYPE_POLICY:-resources}" # resources ou semantic
 HERA_ALIGN_WEIGHT="${HERA_ALIGN_WEIGHT:-1}"
 HERA_RPCL_WEIGHT="${HERA_RPCL_WEIGHT:-1}"
@@ -77,7 +79,7 @@ case "${MODEL,,}" in
 esac
 if [[ -z "$LEARNING_RATE" ]]; then
     case "${MODEL,,}" in
-        vgg11|vgg16) LEARNING_RATE=0.0001 ;;
+        vgg11|vgg16) LEARNING_RATE=0.01 ;;
         *) LEARNING_RATE=0.001 ;;
     esac
 fi
@@ -153,7 +155,7 @@ common_args=(
     -jr "$SELECTION_FRACTION" -ls "$LOCAL_EPOCHS" -lbs "$BATCH_SIZE"
     -lr "$LEARNING_RATE" --policy-seed "$POLICY_SEED"
     --resource-preset "$RESOURCE_PRESET" --experiment-id "${GOAL}_${MODEL}"
-    --aligned-comparison --pruning-round-timeout "$ROUND_TIMEOUT"
+    --aligned-comparison --detailed-evaluation --pruning-round-timeout "$ROUND_TIMEOUT"
     --reward-validation-fraction "$REWARD_VALIDATION_FRACTION"
     --pruning-arms "${pruning_arms[@]}"
     --bandit-alpha "$BANDIT_ALPHA" --bandit-beta "$BANDIT_BETA"
@@ -175,12 +177,15 @@ for algorithm in "${algorithms[@]}"; do
         algorithm_args+=(--hera-semantic --hera-semantic-policy "$HERA_SEMANTIC_POLICY"
                           --hera-communication "$HERA_COMMUNICATION")
         if [[ "$HERA_COMMUNICATION" == "prototypes" ]]; then
-            algorithm_args+=(--hera-prototype-kind "$HERA_PROTOTYPE_KIND"
+            algorithm_args+=(--hera-client-storage "$HERA_CLIENT_STORAGE"
+                              --hera-prototype-kind "$HERA_PROTOTYPE_KIND"
                               --hera-prototype-policy "$HERA_PROTOTYPE_POLICY"
                               --hera-align-weight "$HERA_ALIGN_WEIGHT")
             if [[ "$HERA_PROTOTYPE_KIND" == "relational" ]]; then
                 algorithm_args+=(--hera-rpcl-weight "$HERA_RPCL_WEIGHT" --hera-cpdr-weight "$HERA_CPDR_WEIGHT")
             fi
+        else
+            algorithm_args+=(--hera-global-align-weight "$HERA_GLOBAL_ALIGN_WEIGHT")
         fi
     fi
     "$PYTHON" main.py "${common_args[@]}" "${algorithm_args[@]}" -algo "$algorithm" \

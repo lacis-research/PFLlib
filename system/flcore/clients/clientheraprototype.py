@@ -223,20 +223,20 @@ class clientHERAPrototype(clientFedLoad):
         mode = self.model.training
         self.model.to(self.device)
         self.model.eval()
-        correct = samples = 0
         self._synchronize()
         start = time.perf_counter()
-        with torch.no_grad():
-            for x, y in self.load_test_data():
-                prediction = self.model(x.to(self.device)).argmax(1).cpu()
-                correct += int((prediction == y.cpu()).sum())
-                samples += len(y)
+        # Use the framework's micro AUC and sample-weighted CE loss.
+        # Evaluation must not change the next round's sampling randomness.
+        with torch.random.fork_rng(devices=[]):
+            correct, samples, auc = self.test_metrics()
+            train_loss, train_samples = self.train_metrics()
         self._synchronize()
         duration = time.perf_counter()-start
         self.model.cpu()
         self.model.train(mode)
         return encode(dict(protocol=PROTOCOL, kind='evaluation', client_id=self.id,
                            correct=correct, samples=samples, trained_rounds=self.trained_rounds,
+                           auc=auc, train_loss=train_loss, train_samples=train_samples,
                            evaluation_time=duration))
 
     def checkpoint(self, clone=True):

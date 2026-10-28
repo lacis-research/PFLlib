@@ -72,7 +72,7 @@ class PrototypeHERAFL(HERAFL):
         self.model_shapes = {k: tuple(v.shape) for k, v in self.global_model.state_dict().items()}
         self.dimension = self.global_model.fc.in_features
         template = self.global_model.cpu()
-        self.client_storage = getattr(args, 'hera_client_storage', 'disk')
+        self.client_storage = getattr(args, 'hera_client_storage', 'memory')
         if self.client_storage not in ('disk', 'memory'):
             raise ValueError('hera_client_storage must be disk or memory.')
         self.state_directory = None
@@ -191,9 +191,18 @@ class PrototypeHERAFL(HERAFL):
         valid = [r['accuracy'] for r in metrics if r['accuracy'] is not None]
         total = sum(r['samples'] for r in metrics)
         weighted = sum(r['correct'] for r in metrics)/max(total, 1)
+        auc = sum(r['auc']*r['samples'] for r in metrics)/max(total, 1)
+        train_loss = sum(r['train_loss'] for r in metrics)/max(sum(r['train_samples'] for r in metrics), 1)
+        auc_std = float(np.std([r['auc'] for r in metrics]))
+        print(f'Averaged Train Loss: {train_loss:.4f}')
+        print(f'Averaged Test Accuracy: {weighted:.4f}')
+        print(f'Averaged Test AUC: {auc:.4f}')
+        print(f'Std Test Accuracy: {np.std(valid):.4f}')
+        print(f'Std Test AUC: {auc_std:.4f}')
         self.rs_test_acc.append(weighted)
         self.eval_rounds.append(self.current_round)
         return dict(evaluation_type='local_models_sample_weighted', local_accuracy=weighted,
+                    train_loss=train_loss, test_auc=auc, test_auc_std=auc_std,
                     test_clients=metrics, test_client_mean=float(np.mean(valid)) if valid else None,
                     test_client_median=float(np.median(valid)) if valid else None,
                     test_client_p10=float(np.percentile(valid, 10)) if valid else None,
@@ -204,6 +213,7 @@ class PrototypeHERAFL(HERAFL):
     def train(self):
         for index in range(self.current_round+1, self.global_rounds+1):
             self.current_round = index
+            print(f'\n-------------Round number: {index}-------------', flush=True)
             start = time.perf_counter()
             self.selected_clients = self.select_clients()
             contexts, reference = self.prepare_contexts(), self.snapshot()
@@ -286,7 +296,8 @@ class PrototypeHERAFL(HERAFL):
             record['round_wall_time'] = time.perf_counter()-start
             self.round_reports.append(record)
             self.Budget.append(record['round_wall_time'])
-            print(f'Round {index}: accepted={len(accepted)}, local weighted accuracy={record.get("local_accuracy")}, prototype bytes={sum(r["round_stats"].get("total_communication_bytes", 0) for r in reports)}', flush=True)
+            print('Retentions:', {r['id']: r['retention'] for r in reports})
+            print('Accepted updates:', len(accepted), '| time cost:', self.Budget[-1], flush=True)
             if self.checkpoint_every and index % self.checkpoint_every == 0:
                 self.save_checkpoint(self.output_directory()/'checkpoint')
             if self.auto_break and self.check_done(acc_lss=[self.rs_test_acc], top_cnt=self.top_cnt):
@@ -429,8 +440,15 @@ class PrototypeHERAFL(HERAFL):
             stream.attrs['variant'] = f'{self.kind}:local_only={self.local_only}:semantic_policy={self.use_semantic_policy}'
             stream.create_dataset('rs_local_test_acc', data=self.rs_test_acc)
             stream.create_dataset('eval_rounds', data=self.eval_rounds)
+            evaluations = {r['round']: r for r in self.round_reports}
+            for name, key in (('rs_train_loss', 'train_loss'), ('rs_test_auc', 'test_auc'),
+                              ('rs_test_acc_std', 'test_client_std'), ('rs_test_auc_std', 'test_auc_std')):
+                if all(key in evaluations[r] for r in self.eval_rounds):
+                    stream.create_dataset(name, data=[evaluations[r][key] for r in self.eval_rounds])
         import sys
         sys.path.insert(0, str(Path(__file__).resolve().parents[3]/'tools'))
+        from plot_comparison import render_experiment_metrics
+        render_experiment_metrics(directory/f'{stem}.h5', directory/'plots')
         from comparison_metrics import render_reference_comparison
         render_reference_comparison(
             {self.algorithm: [dict(zip(self.eval_rounds, self.rs_test_acc))]},

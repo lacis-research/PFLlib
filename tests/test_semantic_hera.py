@@ -130,6 +130,73 @@ class LifecycleTests(unittest.TestCase):
     make_args=native_tests.NativeServerTests.make_args
     run_server=native_tests.NativeServerTests.run_server
 
+    def test_global_alignment_changes_learning_and_evaluates_global_weights(self):
+        evaluated = []
+        evaluate = HERAFL.evaluate
+        def check_global(server, *args, **kwargs):
+            self.assertTrue(all(c.model is server.global_model for c in server.clients))
+            evaluated.append(server.current_round)
+            return evaluate(server, *args, **kwargs)
+        servers = []
+        for weight in (0., 1.):
+            torch.manual_seed(123)
+            np.random.seed(123)
+            args = self.make_args(algorithm='HERAFL', hera_semantic=True,
+                                  hera_global_align_weight=weight, global_rounds=2,
+                                  wait_for_all=True, aligned_comparison=True,
+                                  reward_validation_fraction=.2, detailed_evaluation=True)
+            with patch.object(HERAFL, 'evaluate', check_global):
+                server, _ = self.run_server(HERAFL, args)
+            servers.append(server)
+        self.assertEqual(evaluated, [1, 2, 1, 2])
+        for left, right in zip(servers[0].round_reports[0]['clients'], servers[1].round_reports[0]['clients']):
+            self.assertEqual(left['accuracy'], right['accuracy'])
+            self.assertEqual(right['round_stats']['prototype_alignment_samples'], 0)
+        self.assertTrue(any(r['round_stats']['prototype_alignment_samples'] > 0
+                            for r in servers[1].round_reports[1]['clients']))
+        self.assertTrue(any(not torch.equal(a, b) for a, b in
+                            zip(servers[0].global_model.parameters(), servers[1].global_model.parameters())))
+        self.assertTrue(all(r['global_accuracy'] is not None for r in servers[1].round_reports))
+        self.assertIn('balanced_accuracy', servers[1].round_reports[-1]['test_sample_weighted'])
+
+    def test_global_alignment_expires_references_and_collects_with_legacy_policy(self):
+        server, _ = self.run_server(HERAFL, self.make_args(
+            algorithm='HERAFL', hera_semantic=True, hera_global_align_weight=1.,
+            hera_semantic_policy='legacy', hera_semantic_max_age=0,
+            global_rounds=2, wait_for_all=True))
+        self.assertTrue(server.semantic_collect)
+        self.assertTrue(server.semantic_bank.prototypes)
+        self.assertTrue(all(r['round_stats']['prototype_alignment_samples'] == 0
+                            for rr in server.round_reports for r in rr['clients']))
+
+    def test_global_alignment_validates_configuration(self):
+        for weight in (-1., float('nan'), float('inf')):
+            with self.assertRaisesRegex(ValueError, 'finite and nonnegative'):
+                HERAFL(self.make_args(algorithm='HERAFL', hera_semantic=True,
+                                     hera_global_align_weight=weight), 0)
+        with self.assertRaisesRegex(ValueError, 'requires --hera-semantic'):
+            HERAFL(self.make_args(algorithm='HERAFL', hera_global_align_weight=1.), 0)
+
+    def test_alignment_has_feature_gradients_and_detached_targets(self):
+        from flcore.clients.clientherafl import clientHERAFL
+        client = object.__new__(clientHERAFL)
+        client.model = DNN(4, 8, 3)
+        client.loss = torch.nn.CrossEntropyLoss()
+        client.global_align_weight = 1.
+        teacher = torch.randn(8, requires_grad=True)
+        client.alignment_targets = {0: torch.nn.functional.normalize(teacher.detach(), dim=0)}
+        client.alignment_sum, client.alignment_samples = 0., 0
+        x, y = torch.randn(3, 4), torch.tensor([0, 0, 2])
+        loss = client.training_loss(x, y)
+        ce = client.loss(client.model(x), y)
+        self.assertGreater(float(loss-ce), 0.)
+        (loss-ce).backward()
+        self.assertTrue(any(p.grad is not None and p.grad.abs().sum() > 0 for p in client.model.parameters()))
+        self.assertIsNone(teacher.grad)
+        self.assertEqual(client.alignment_samples, 2)
+        torch.testing.assert_close(client.training_loss(x, torch.full_like(y, 1)),
+                                   client.loss(client.model(x), torch.full_like(y, 1)))
+
     def test_two_rounds_frozen_context_previous_bank_costs_and_validation(self):
         args=self.make_args(algorithm='HERAFL', hera_semantic=True, global_rounds=2,
                             pruning_arms=[.5,1.],

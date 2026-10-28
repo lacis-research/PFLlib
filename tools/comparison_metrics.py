@@ -16,7 +16,11 @@ TOTAL_METRICS = {
 
 
 def style(algorithm):
-    return STYLES.get(algorithm, (algorithm, None, 'o', '-'))
+    for name, values in STYLES.items():
+        normalized = algorithm.lower().replace('-', '').replace('_', '')
+        if normalized.startswith(name.lower()):
+            return values
+    return (algorithm, None, 'o', '-')
 
 
 def save(fig, output, filename, formats):
@@ -139,6 +143,16 @@ def render_reference_comparison(global_accuracy, policy_runs, output, formats, e
     output.mkdir(parents=True, exist_ok=True)
     evaluation_types = evaluation_types or {}
     has_local = 'local_models_sample_weighted' in evaluation_types.values()
+    test_labels = {
+        a: style(a)[0] + (' (modelos locais)' if evaluation_types.get(a) == 'local_models_sample_weighted'
+                         else ' (modelo global)')
+        for a in global_accuracy
+    }
+    test_percent = {a: [{r: value * 100 for r, value in series.items()} for series in runs]
+                    for a, runs in global_accuracy.items()}
+    draw_lines(test_percent, output, 'sample_weighted_test_accuracy_per_round_comparison',
+               'Acurácia de teste ponderada por amostras', 'Acurácia de teste (%)',
+               formats, labels=test_labels)
     labels = {a: style(a)[0] + (' (modelos locais)' if evaluation_types.get(a) == 'local_models_sample_weighted' else ' (modelo global)')
               for a in global_accuracy} if has_local else None
     local_accuracy = {}

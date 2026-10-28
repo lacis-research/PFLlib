@@ -53,7 +53,10 @@ def save_policy_results(server):
                     batch_size=server.batch_size, learning_rate=server.learning_rate,
                     client_profiles={str(c.id): c.profile for c in server.clients})
     if server.algorithm == 'HERAFL':
-        metadata.update(hera_base='FedLoad', hera_variant='fedload-semantic-v2',
+        metadata.update(hera_base='FedLoad', hera_variant='global-prototype-alignment-v1',
+                        evaluation_type='global_model',
+                        global_alignment_weight=getattr(server, 'global_align_weight', 0.),
+                        local_objective='cross_entropy_plus_normalized_prototype_distance',
                         policy_learning_context='selection_context' if getattr(server, 'semantic_collect', False) else 'response_context')
     partition_config = Path('../dataset') / server.dataset / 'config.json'
     metadata['partition_metadata'] = json.loads(partition_config.read_text()) if partition_config.exists() else None

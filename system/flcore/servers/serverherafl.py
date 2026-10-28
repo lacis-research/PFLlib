@@ -1,4 +1,4 @@
-"""HERAFL is FedLoad plus optional semantic submodel selection."""
+"""Global weight aggregation with semantic selection and prototype alignment."""
 import numpy as np
 from flcore.servers.serverfedload import FedLoad
 from flcore.clients.clientherafl import clientHERAFL
@@ -20,7 +20,12 @@ class HERAFL(FedLoad):
         from flcore.trainmodel.models import FedAvgCNN, DNN
         from flcore.trainmodel.vgg import VGG11, VGG16
         import math
+        self.global_align_weight = getattr(args, 'hera_global_align_weight', 0.)
+        if not math.isfinite(self.global_align_weight) or self.global_align_weight < 0:
+            raise ValueError('hera_global_align_weight must be finite and nonnegative.')
         self.semantic_enabled = getattr(args, 'hera_semantic', False)
+        if self.global_align_weight and not self.semantic_enabled:
+            raise ValueError('Global prototype alignment requires --hera-semantic.')
         if self.semantic_enabled:
             if getattr(args, 'hera_semantic_policy', 'linucb') not in ('linucb', 'heuristic', 'legacy'):
                 raise ValueError('Unknown semantic policy.')
@@ -39,7 +44,7 @@ class HERAFL(FedLoad):
                 if value is not None and (not math.isfinite(value) or value <= 0):
                     raise ValueError(key + ' must be finite and positive.')
             if getattr(args, 'hera_rpcl_weight', 0) or getattr(args, 'hera_cpdr_weight', 0):
-                raise ValueError('RPCL/CPDR are optional future extensions; this implementation supports CE only.')
+                raise ValueError('Global mode supports CE plus --hera-global-align-weight; RPCL/CPDR require prototype communication.')
             features = getattr(args, 'hera_semantic_features', 'H,U,D,Q').split(',')
             if not features or len(set(features)) != len(features) or set(features)-set('HUDQ'):
                 raise ValueError('hera_semantic_features must be a nonempty subset of H,U,D,Q.')
@@ -58,7 +63,7 @@ class HERAFL(FedLoad):
             self.semantic_reward_time_scale = getattr(args, 'hera_semantic_reward_time_scale', 60.)
             self.semantic_memory_limit = getattr(args, 'hera_semantic_memory_limit', None)
             self.semantic_time_limit = getattr(args, 'hera_semantic_time_limit', None)
-            self.semantic_collect = self.bandit.policy != 'legacy' or self.semantic_reward_weight > 0
+            self.semantic_collect = self.bandit.policy != 'legacy' or self.semantic_reward_weight > 0 or self.global_align_weight > 0
             self.semantic_history = {}
             self.semantic_bank = Bank(dimension=self.global_model.fc.in_features)
             self.semantic_bank_bytes = wire_bytes(self.semantic_bank)
@@ -123,6 +128,10 @@ class HERAFL(FedLoad):
         client.set_submodel(model, coordinates, retention)
         client.semantic_collect = self.semantic_collect
         client.semantic_snapshot = copy.deepcopy(self.semantic_bank) if self.semantic_collect else Bank()
+        if self.global_align_weight and (self.current_round <= self.semantic_warmup or
+                                         self.current_round-self.semantic_bank.round > self.semantic_max_age):
+            client.semantic_snapshot = Bank(dimension=self.global_model.fc.in_features)
+        client.global_align_weight = self.global_align_weight
         client.semantic_round = self.current_round
         return retention, info
 

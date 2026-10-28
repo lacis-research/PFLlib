@@ -91,7 +91,7 @@ class clientFedLoad(Client):
                 if self.train_slow:
                     time.sleep(0.1 * np.abs(np.random.rand()))
                 self.optimizer.zero_grad()
-                self.loss(self.model(x), y).backward()
+                self.training_loss(x, y).backward()
                 if self.reference_training and not self.model.augment:
                     # Keras weight_decay is decoupled from the momentum gradient.
                     with torch.no_grad():
@@ -103,6 +103,9 @@ class clientFedLoad(Client):
         self.train_time_cost['num_rounds'] += 1
         self.train_time_cost['total_cost'] += compute_time
         self.record_resources(compute_time)
+
+    def training_loss(self, x, y):
+        return self.loss(self.model(x), y)
 
     def record_resources(self, compute_time):
         size = sum(p.numel() * p.element_size() for p in self.model.parameters())
