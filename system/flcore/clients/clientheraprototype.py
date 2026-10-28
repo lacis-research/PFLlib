@@ -1,4 +1,4 @@
-"""Persistent local pruning; only prototype/telemetry messages leave this client."""
+"""FedSC local updates initialized from global weights, with HeraFL pruning."""
 import copy
 from contextlib import contextmanager
 import time
@@ -130,13 +130,19 @@ class clientHERAPrototype(clientFedLoad):
 
     def exchange(self, request):
         message = decode(request)
-        allowed = {'protocol', 'kind', 'client_id', 'round', 'retention', 'reference', 'options', 'seed', 'system_seed'}
+        allowed = {'protocol', 'kind', 'client_id', 'round', 'retention', 'reference', 'options', 'seed', 'system_seed', 'state'}
         if set(message) != allowed or message['protocol'] != PROTOCOL or message['kind'] != 'train' or message['client_id'] != self.id:
             raise ValueError('Invalid prototype training request.')
         options, reference = message['options'], message['reference']
         if reference['dimension'] != self.master.fc.in_features:
             raise ValueError('Reference dimension mismatch.')
         self.prototype_options = options
+        if message['state'] is not None:
+            self.master.load_state_dict(message['state'], strict=True)
+            # Each participation starts a fresh optimizer from the global model.
+            self.moments = {}
+        elif not self.local_config:
+            raise ValueError('Collaborative prototype training requires global weights.')
         adaptation = self.install_local(message['retention'])
         if message.get('seed') is not None:
             seed = message['seed']
@@ -148,17 +154,50 @@ class clientHERAPrototype(clientFedLoad):
         self.model.train()
         self._synchronize()
         start = time.perf_counter()
-        for _ in range(self.local_epochs):
+        diagnostics = []
+        prototype_sums, prototype_counts = {}, {}
+        for epoch in range(self.local_epochs):
+            sums = dict(ce=0., cpdr=0., rpcl=0., total=0.)
+            samples = 0
+            semantic_seconds = backward_seconds = 0.
+            epoch_start = time.perf_counter()
             for x, y in loader:
                 x, y = x.to(self.device), y.to(self.device)
                 self.optimizer.zero_grad()
                 logits, features = self.model.forward_with_features(x)
-                loss = self.loss(logits, y)
+                ce = self.loss(logits, y)
+                loss = ce
+                align = contrast = features.sum()*0
                 if options['alignment'] or options['rpcl'] or options['cpdr']:
-                    align, contrast = semantic_losses(features, y, reference, options['temperature'])
+                    self._synchronize()
+                    semantic_start = time.perf_counter()
+                    align, contrast = semantic_losses(features, y, reference, options['temperature'],
+                                                       compute_contrastive=bool(options['rpcl']))
+                    self._synchronize()
+                    semantic_seconds += time.perf_counter()-semantic_start
                     loss = loss + (options['alignment']+options['cpdr'])*align + options['rpcl']*contrast
+                self._synchronize()
+                backward_start = time.perf_counter()
                 loss.backward()
                 self.optimizer.step()
+                if epoch == self.local_epochs-1 and not self.local_config:
+                    # Upstream collects pre-update forward features in the last epoch.
+                    with torch.no_grad():
+                        for label in y.unique().tolist():
+                            values = features.detach()[y == label]
+                            prototype_sums[label] = prototype_sums.get(label, 0)+values.sum(dim=0)
+                            prototype_counts[label] = prototype_counts.get(label, 0)+len(values)
+                self._synchronize()
+                backward_seconds += time.perf_counter()-backward_start
+                for key, value in [('ce', ce), ('cpdr', align), ('rpcl', contrast), ('total', loss)]:
+                    sums[key] += float(value.detach())*len(y)
+                samples += len(y)
+            record = dict(epoch=epoch+1, samples=samples, **{k: v/max(samples, 1) for k, v in sums.items()},
+                          semantic_loss_forward_seconds=semantic_seconds, backward_step_seconds=backward_seconds,
+                          seconds=time.perf_counter()-epoch_start)
+            record['weighted_cpdr'] = (options['alignment']+options['cpdr'])*record['cpdr']
+            record['weighted_rpcl'] = options['rpcl']*record['rpcl']
+            diagnostics.append(record)
         self._synchronize()
         training_time = time.perf_counter()-start
         self.train_time_cost['num_rounds'] += 1
@@ -171,6 +210,10 @@ class clientHERAPrototype(clientFedLoad):
             payload = extract(self.model, DataLoader(loader.dataset, batch_size=self.batch_size, shuffle=False),
                               self.num_classes, self.id, message['round'], self.retention,
                               reference_bank(reference), self.device)
+            # extract above supplies HeraFL policy indicators; collaboration uses
+            # the last-epoch feature means, matching Local.local_train/average_kns.
+            payload.prototypes = {k: v/prototype_counts[k] for k, v in prototype_sums.items()}
+            payload.counts = prototype_counts
         self._synchronize()
         extraction_time = time.perf_counter()-start
         start = time.perf_counter()
@@ -182,13 +225,14 @@ class clientHERAPrototype(clientFedLoad):
         start = time.perf_counter()
         self.commit_local()
         adaptation += time.perf_counter()-start
-        telemetry = dict(training_time=training_time, semantic_extraction_time=extraction_time,
+        telemetry = dict(loss_diagnostics=diagnostics, training_time=training_time, semantic_extraction_time=extraction_time,
                          adaptation_time=adaptation, validation_time=validation_time,
                          validation_correct=correct, validation_samples=samples,
                          system_state=self.current_system_state, parameter_fraction=active_bytes/master_bytes,
                          active_parameter_bytes=active_bytes, local_state_bytes=self.local_state_bytes())
         self.train_time_cost['total_cost'] += training_time+extraction_time+adaptation+validation_time
-        return encode(dict(protocol=PROTOCOL, kind='response', payload=payload_dict(payload), telemetry=telemetry))
+        return encode(dict(protocol=PROTOCOL, kind='response', payload=payload_dict(payload), telemetry=telemetry,
+                           state=None if self.local_config else self.model.state_dict()))
 
     def local_round(self, round_index):
         """Independent baseline. Request/response objects below are local traces,
@@ -200,7 +244,7 @@ class clientHERAPrototype(clientFedLoad):
         context = self.get_context(cfg['max_samples'])
         arm, info = self.local_bandit.choose_pruning_rate(context, [])
         request = encode(dict(protocol=PROTOCOL, kind='train', client_id=self.id, round=round_index,
-                              retention=arm, reference=empty_reference(self.master.fc.in_features),
+                              retention=arm, state=None, reference=empty_reference(self.master.fc.in_features),
                               options=dict(alignment=0., rpcl=0., cpdr=0., temperature=.05),
                               seed=cfg['seed']+round_index*cfg['num_clients']+self.id,
                               system_seed=[cfg['seed'], round_index, self.id]))
@@ -219,7 +263,7 @@ class clientHERAPrototype(clientFedLoad):
         info.update(selection_mode='independent_local', local_reward=reward)
         return arm, info, context, response
 
-    def evaluate_local(self):
+    def evaluate_local(self, detailed=False):
         mode = self.model.training
         self.model.to(self.device)
         self.model.eval()
@@ -230,6 +274,10 @@ class clientHERAPrototype(clientFedLoad):
         with torch.random.fork_rng(devices=[]):
             correct, samples, auc = self.test_metrics()
             train_loss, train_samples = self.train_metrics()
+            extra = {}
+            if detailed:
+                from flcore.heterogeneity.semantic import classification_summary
+                extra['confusion'] = classification_summary(self.model, self.load_test_data(), self.num_classes, self.device).tolist()
         self._synchronize()
         duration = time.perf_counter()-start
         self.model.cpu()
@@ -237,7 +285,7 @@ class clientHERAPrototype(clientFedLoad):
         return encode(dict(protocol=PROTOCOL, kind='evaluation', client_id=self.id,
                            correct=correct, samples=samples, trained_rounds=self.trained_rounds,
                            auc=auc, train_loss=train_loss, train_samples=train_samples,
-                           evaluation_time=duration))
+                           evaluation_time=duration, **extra))
 
     def checkpoint(self, clone=True):
         # Local persistence artifact, not a federated message.

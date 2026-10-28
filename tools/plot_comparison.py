@@ -11,7 +11,6 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 from comparison_metrics import render_reference_comparison, style
-from contribution_plots import render_contributions
 
 
 METRICS = {
@@ -58,26 +57,19 @@ def draw(data, title, ylabel, output, formats):
     plt.close(fig)
 
 
-def render_experiment_metrics(path, output):
-    """Render the five framework evaluation metrics for a saved run."""
-    output = Path(output)
+def render_global_metrics(metrics, evaluation_types, output, formats=('png',)):
+    """Never substitute personalized/local evaluations for a global model."""
     output.mkdir(parents=True, exist_ok=True)
-    with h5py.File(path, 'r') as stream:
-        local = stream.attrs.get('evaluation_type') == 'local_models_sample_weighted'
-        label = 'Modelos locais' if local else 'Modelo global'
-        method = re.search(r'_(HERAFL|FedLoad|FedAvg)_', Path(path).stem)
-        if method:
-            label = method[1] + ' — ' + label
-        for name, (filename, title, scale, unit) in METRICS.items():
-            source = 'rs_local_test_acc' if local and name == 'rs_test_acc' else name
-            if source not in stream or not len(stream[source]):
-                continue
-            values = np.asarray(stream[source], dtype=float)
-            if 'eval_rounds' not in stream or len(stream['eval_rounds']) != len(values):
-                continue
-            series = {int(r): float(v*scale) for r, v in zip(stream['eval_rounds'], values) if np.isfinite(v)}
-            if series:
-                draw({label: [series]}, title, unit, output / filename, ['png'])
+    for key, filename, title, ylabel in [
+        ('rs_test_acc', 'global_accuracy_per_round_comparison', 'Acurácia de teste dos modelos globais', '%'),
+        ('rs_train_loss', 'global_train_loss_per_round_comparison', 'Loss de treino dos modelos globais', 'Entropia cruzada'),
+        ('rs_test_auc', 'global_test_auc_per_round_comparison', 'AUC de teste dos modelos globais', 'AUC')]:
+        data = {a: runs for a, runs in metrics.get(key, {}).items()
+                if evaluation_types.get(a) == 'global_model' and any(runs)}
+        if data:
+            draw(data, title, ylabel, output / filename, formats)
+        else:
+            print(f'Notice: no global model data for {filename}.')
 
 
 def read_policy(path):
@@ -255,24 +247,8 @@ def main():
                        for algorithm, runs in metrics['rs_test_acc'].items()}
     render_reference_comparison(global_accuracy, policy_runs, output / 'plots', args.formats,
                                 evaluation_types=evaluation_types)
-    if 'local_models_sample_weighted' in evaluation_types.values():
-        draw({a + (' (modelos locais)' if evaluation_types[a] == 'local_models_sample_weighted' else ' (modelo global)'): reps for a, reps in metrics['rs_test_acc'].items()},
-             'Acurácia ponderada nas partições de teste — protocolos distintos', '%', output / 'test_accuracy_by_protocol', args.formats)
-    render_contributions(contribution_runs, output / 'plots', args.formats, accuracy_target=args.accuracy_target)
-    for name, (filename, title, _, unit) in METRICS.items():
-        if metrics[name]:
-            labeled = {a + (' (modelos locais)' if evaluation_types[a] == 'local_models_sample_weighted' else ' (modelo global)'): reps
-                       for a, reps in metrics[name].items()}
-            draw(labeled, f'{args.dataset} — {title}', unit, output / 'plots' / filename, args.formats)
-    if not args.extra_metrics:
-        print('Resources and mean client accuracy require policy JSON; missing methods are omitted.')
-        print('Total round time sums client times; it is not process wall-clock time.')
-        return
-    for name, (title, unit) in RESOURCES.items():
-        if resources[name]:
-            draw(resources[name], f'{args.dataset} — {title}', unit, output / name, args.formats)
-    print('Bands: mean ± population standard deviation across repetitions.')
-    print('Resource plots use policy logs only. Client time is not process wall-clock time.')
+    render_global_metrics(metrics, evaluation_types, output / 'plots', args.formats)
+    print('Costs include all recorded client work. Coverage differs by protocol; accumulated client time is not wall-clock duration.')
 
 
 if __name__ == '__main__':

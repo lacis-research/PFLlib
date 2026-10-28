@@ -1,9 +1,7 @@
-"""Prototype-only wire protocol and FedSC-inspired, explicitly adapted losses.
+"""HERAFL global weights + prototypes, with the official FedSC local losses.
 
-Wire format is canonical UTF-8 JSON with base64 little-endian float32 vectors.
-It contains no parameter/state-dict message type. Transport sizes include JSON
-and base64 overhead, not just tensor storage. The FedSC U factor is not used;
-CPDR here is normalized MSE, not a literal reproduction of Eq. 15.
+JSON/base64 float32 transport sizes include serialization overhead. Local losses follow ../FedSC at a04dc8e630706a0c3f12f716c45857ead95a4940,
+which differs from the PDF (no explicit U, CPDR uses MSE).
 """
 import base64
 import copy
@@ -14,7 +12,8 @@ import torch
 import torch.nn.functional as F
 from .semantic import Bank, Payload, build_bank, SCHEMA
 
-PROTOCOL = 'herafl-prototypes-v1'
+PROTOCOL = 'herafl-global-prototypes-v3'
+FEDSC_REFERENCE = 'a04dc8e630706a0c3f12f716c45857ead95a4940'
 
 
 def encode(value):
@@ -30,6 +29,12 @@ def encode(value):
             return [convert(x) for x in v]
         return v
     return json.dumps(convert(value), sort_keys=True, separators=(',', ':'), allow_nan=False).encode('utf-8')
+
+
+def state_wire_size(state):
+    """Exact encode(state) length without allocating its base64 weight payload."""
+    metadata = {k: {'f32': '', 'shape': list(v.shape)} for k, v in state.items()}
+    return len(encode(metadata)) + sum(4*((v.numel()*4+2)//3) for v in state.values())
 
 
 def decode(data):
@@ -78,61 +83,80 @@ def reference_bank(reference):
                 {int(k): v for k, v in reference['prototypes'].items()}, reference['contributors'])
 
 
-def build_reference(payloads, previous, round_index, classes, kind='simple', neighbors=1):
+def build_reference(payloads, previous, round_index, classes, kind='simple', neighbors=1, device=None):
     if not payloads:
         return copy.deepcopy(previous)
-    bank = build_bank(payloads, reference_bank(previous), round_index)
-    result = dict(round=round_index, dimension=bank.dimension, prototypes=bank.prototypes,
-                  relations={}, contributors=bank.contributors)
     if kind == 'simple':
-        return result
-    # Discrepancy weights indexed by real client IDs, never by class-list position.
-    sizes = {p.client_id: sum(p.counts.values()) for p in payloads}
-    discrepancies = {p.client_id: math.sqrt(.5*sum((p.counts.get(k, 0)/max(sizes[p.client_id], 1)-1/classes)**2
-                                                  for k in range(classes))) for p in payloads}
-    total, dis_total = sum(sizes.values()), sum(discrepancies.values())
-    weights = {i: 1/(1+math.exp(-(sizes[i]/max(total, 1) - (discrepancies[i]/dis_total if dis_total else 0)))) for i in sizes}
-    for label in bank.prototypes:
-        members = sorted([(p.client_id, p.prototypes[label]) for p in payloads if label in p.prototypes])
-        center = torch.stack([v for _, v in members]).mean(0)
-        valid = {i: v for i, v in members if v.norm() > 1e-12 and center.norm() > 1e-12}
-        angular = {i: float(F.cosine_similarity(v, center, dim=0)) for i, v in valid.items()}
-        relations, ids = [], []
-        for i, vector in members:
-            nearest = sorted((j for j in valid if j != i), key=lambda j: (abs(angular[i]-angular[j]), j))[:neighbors] if i in valid else []
-            relations.append(torch.stack([vector] + [valid[j] for j in nearest]).mean(0))
-            ids.append(i)
-        w = torch.tensor([weights[i] for i in ids])
-        result['relations'][label] = torch.stack(relations)
-        result['prototypes'][label] = (torch.stack(relations)* (w/w.sum())[:, None]).sum(0)
+        bank = build_bank(payloads, reference_bank(previous), round_index)
+        return dict(round=round_index, dimension=bank.dimension, prototypes=bank.prototypes,
+                    relations={}, contributors=bank.contributors)
+    # Match Global.get_re_p/get_co_p, including observable upstream behavior:
+    # get_re_p changes a temporary stack but returns the original prototype lists.
+    # get_co_p weights each class list by POSITION, not its contributor's ID.
+    sizes = [sum(p.counts.values()) for p in payloads]
+    if any(n <= 0 for n in sizes):
+        raise ValueError('Official FedSC discrepancy weights require nonempty clients.')
+    discrepancies = [math.sqrt(.5*sum((p.counts.get(k, 0)/n-1/classes)**2
+                                     for k in range(classes))) for p, n in zip(payloads, sizes)]
+    total, dis_total = sum(sizes), sum(discrepancies)
+    if dis_total == 0:
+        raise ValueError('Official FedSC divides by zero when every client has a uniform class distribution; no replacement weighting was invented.')
+    raw = np.array([1/(1+np.exp(-(n/total-d/dis_total))) for n, d in zip(sizes, discrepancies)])
+    weights = torch.as_tensor(raw/raw.sum(), device=device or next(iter(payloads[0].prototypes.values())).device)
+    result = empty_reference(payloads[0].dimension)
+    result['round'] = round_index
+    members = {}
+    for payload in payloads:
+        for label, vector in payload.prototypes.items():
+            members.setdefault(label, []).append(vector.detach().to(weights.device))
+            result['contributors'].setdefault(label, []).append(payload.client_id)
+    for label, vectors in members.items():
+        weighted = torch.stack([v*weights[i] for i, v in enumerate(vectors)])
+        # The weighted relations themselves are broadcast by the upstream code.
+        result['relations'][label] = weighted.cpu()
+        result['prototypes'][label] = weighted.sum(dim=0).cpu()
     return result
 
 
-def semantic_losses(features, labels, reference, temperature=.05):
-    """Normalized alignment/CPDR and multi-positive cosine InfoNCE."""
+def semantic_losses(features, labels, reference, temperature=.05, compute_contrastive=True):
+    """Match Local.local_train + InfoNCE_LCL in FedSC commit a04dc8e.
+
+    CPDR is mean squared error on raw features. RPCL has one averaged positive
+    per sample and the shared negative pool assembled across the minibatch,
+    including its repetitions. No dataset-wide U is computed. References are
+    fixed targets; the official missing-class fallback is the detached feature.
+    """
     zero = features.sum()*0
-    alignment, contrastive = [], []
+    if not reference['prototypes'] and not reference['relations']:
+        return zero, zero
     prototypes = {int(k): v.detach().to(features.device) for k, v in reference['prototypes'].items()}
     relations = {int(k): v.detach().to(features.device) for k, v in reference['relations'].items()}
-    z = F.normalize(features, dim=1)
-    for label in labels.unique().tolist():
-        subset = z[labels == label]
-        if label in prototypes and prototypes[label].norm() > 1e-12:
-            target = F.normalize(prototypes[label], dim=0)
-            alignment.append((subset-target).square().mean(1))
-        positive = relations.get(label)
-        negatives = [v for k, v in relations.items() if k != label]
-        if positive is None or not negatives:
-            continue
-        positive = positive[positive.norm(dim=1) > 1e-12]
-        negative = torch.cat(negatives)
-        negative = negative[negative.norm(dim=1) > 1e-12]
-        if len(positive) and len(negative):
-            pos = subset @ F.normalize(positive, dim=1).T / temperature
-            neg = subset @ F.normalize(negative, dim=1).T / temperature
-            contrastive.append(torch.logsumexp(torch.cat([pos, neg], dim=1), dim=1)-torch.logsumexp(pos, dim=1))
-    return (torch.cat(alignment).mean() if alignment else zero,
-            torch.cat(contrastive).mean() if contrastive else zero)
+    positive, targets, negatives = [], [], []
+    for i, label in enumerate(labels.tolist()):
+        if label in relations and label in prototypes:
+            positive.append(relations[label].mean(dim=0))
+            targets.append(prototypes[label])
+        elif not relations and label in prototypes:  # simple-prototype ablation
+            positive.append(prototypes[label])
+            targets.append(prototypes[label])
+        else:
+            positive.append(features[i].detach())
+            targets.append(features[i].detach())
+        if compute_contrastive:
+            negatives.extend(value for key, value in relations.items() if key != label)
+    cpdr = F.mse_loss(features, torch.stack(targets))
+    if not compute_contrastive or not relations:
+        return cpdr, zero
+    if not negatives:
+        raise ValueError('FedSC RPCL requires a nonempty negative pool; the official implementation cannot stack an empty pool.')
+    query = F.normalize(features, dim=-1)
+    pos_key = F.normalize(torch.stack(positive), dim=-1)
+    neg_keys = F.normalize(torch.cat(negatives, dim=0), dim=-1)
+    pos_logit = torch.sum(query*pos_key, dim=1, keepdim=True)
+    neg_logits = (query.unsqueeze(1) @ neg_keys.transpose(-2, -1)).squeeze(1)
+    logits = torch.cat([pos_logit, neg_logits], dim=1)
+    contrastive = F.cross_entropy(logits/temperature, torch.zeros(len(features), dtype=torch.long, device=features.device))
+    return cpdr, contrastive
 
 
 def resource_stats(telemetry, upload_bytes, download_bytes, profile):

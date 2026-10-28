@@ -191,11 +191,6 @@ class Server(object):
                 for name in ('rs_test_acc_std', 'rs_test_auc_std'):
                     hf.create_dataset(name, data=getattr(self, name, []))
 
-            import sys
-            from pathlib import Path
-            sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'tools'))
-            from plot_comparison import render_experiment_metrics
-            render_experiment_metrics(file_path, Path(result_path) / 'plots')
 
     def save_item(self, item, item_name):
         if not os.path.exists(self.save_folder_name):

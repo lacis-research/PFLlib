@@ -9,9 +9,9 @@ STYLES = {
     'FedMP': ('FedMP', '#d62728', 'D', ':'),
 }
 TOTAL_METRICS = {
-    'energy_consumption': ('total_energy_per_experiment_comparison', 'Total Energy Per Experiment Comparison', 'Total Energy Consumption (J)'),
-    'round_time': ('total_round_time_per_experiment_comparison', 'Total Round Time Per Experiment Comparison', 'Total Round Time (s)'),
-    'total_communication_bytes': ('total_communication_per_experiment_comparison', 'Total Communication Per Experiment Comparison', 'Total Communication (bytes)'),
+    'energy_consumption': ('total_energy_per_experiment_comparison', 'Total Energy Per Experiment Comparison', 'Recorded Estimated Client Energy (J)'),
+    'round_time': ('total_round_time_per_experiment_comparison', 'Accumulated Client Time Per Experiment', 'Sum of Client Times (s; compute + estimated transfer)'),
+    'total_communication_bytes': ('total_communication_per_experiment_comparison', 'Total Communication Per Experiment Comparison', 'Recorded Modeled Communication (bytes)'),
 }
 
 
@@ -31,23 +31,13 @@ def save(fig, output, filename, formats):
     plt.close(fig)
 
 
-def mean_accuracy(reports):
-    result = {}
-    for report in reports:
-        # The source averages responding clients, without weighting by dataset size.
-        accuracies = [c['accuracy'] for c in report['clients']
-                      if c.get('status') == 'accepted' and c.get('accuracy') is not None]
-        if accuracies:
-            result[int(report['round'])] = float(np.mean(accuracies))
-    return result
-
-
 def experiment_total(reports, metric, include_all=False):
     if include_all:
         initialization = {'round_time': 'initialization_time', 'energy_consumption': 'initialization_energy', 'total_communication_bytes': 'initialization_bytes'}[metric]
         evaluation = {'round_time': 'evaluation_total_time', 'energy_consumption': 'evaluation_energy', 'total_communication_bytes': 'evaluation_telemetry_bytes'}[metric]
         return sum(sum(c['round_stats'][metric] for c in r['clients'] if c.get('round_stats'))
-                   + r.get(initialization, 0) + r.get(evaluation, 0) for r in reports)
+                   + r.get(initialization, 0) + (r.get('evaluation_communication_bytes', r.get(evaluation, 0))
+                     if metric == 'total_communication_bytes' else r.get(evaluation, 0)) for r in reports)
     return sum(c['round_stats'][metric] for r in reports for c in r['clients'] if c.get('status', 'accepted') == 'accepted')
 
 
@@ -141,30 +131,53 @@ def draw_capacity(policy_runs, output, formats):
 
 def render_reference_comparison(global_accuracy, policy_runs, output, formats, evaluation_types=None):
     output.mkdir(parents=True, exist_ok=True)
-    evaluation_types = evaluation_types or {}
-    has_local = 'local_models_sample_weighted' in evaluation_types.values()
-    test_labels = {
-        a: style(a)[0] + (' (modelos locais)' if evaluation_types.get(a) == 'local_models_sample_weighted'
-                         else ' (modelo global)')
-        for a in global_accuracy
-    }
-    test_percent = {a: [{r: value * 100 for r, value in series.items()} for series in runs]
-                    for a, runs in global_accuracy.items()}
-    draw_lines(test_percent, output, 'sample_weighted_test_accuracy_per_round_comparison',
-               'Acurácia de teste ponderada por amostras', 'Acurácia de teste (%)',
-               formats, labels=test_labels)
-    labels = {a: style(a)[0] + (' (modelos locais)' if evaluation_types.get(a) == 'local_models_sample_weighted' else ' (modelo global)')
-              for a in global_accuracy} if has_local else None
-    local_accuracy = {}
-    for algorithm, runs in policy_runs.items():
-        series = [mean_accuracy(reports) for _, reports in runs]
-        series = [s for s in series if s]
-        if series:
-            local_accuracy[algorithm] = series
-    draw_lines(local_accuracy, output, 'mean_accuracy_per_round_comparison',
-               'Mean Accuracy Per Round Comparison', 'Mean Accuracy (fraction, 0–1)', formats)
-    draw_lines(global_accuracy, output, 'global_accuracy_per_round_comparison',
-               'Test Accuracy Per Round Comparison — modelos locais/globais' if has_local else 'Global Accuracy Per Round Comparison',
-               'Sample-weighted Test Accuracy (fraction, 0–1)' if has_local else 'Global Accuracy (fraction, 0–1)', formats, labels=labels)
-    draw_capacity(policy_runs, output, formats)
-    draw_totals(policy_runs, output, formats, include_all=has_local)
+    draw_totals(policy_runs, output, formats, include_all=True)
+    if set(global_accuracy).issubset(policy_runs):
+        render_local_test_metrics(policy_runs, output, formats)
+
+
+def render_local_test_metrics(policy_runs, output, formats=('png',)):
+    output.mkdir(parents=True, exist_ok=True)
+    if len(policy_runs) > 1 and any(c.get('local_test', {}).get('protocol') == 'local-test-v1'
+            for runs in policy_runs.values() for _, reports in runs for r in reports for c in r['clients']):
+        note = ('Legacy local-test-v1 hashes depend on shuffled sample order and cannot verify partition identity. '
+                'Comparison matches repetition, round, client ID and sample count; identical test partitions are assumed. '
+                'New local-test-v2 runs verify order-independent hashes.\n')
+        print('Notice: ' + note.strip())
+        (output / 'local_test_comparison_notes.txt').write_text(note, encoding='utf-8')
+    for metric, filename, title, ylabel in [
+        ('correct', 'local_test_accuracy_per_round_comparison', 'Acurácia de teste dos modelos locais', 'Acurácia'),
+        ('loss_sum', 'local_test_loss_per_round_comparison', 'Loss de teste dos modelos locais', 'Entropia cruzada'),
+        ('auc', 'local_test_auc_per_round_comparison', 'AUC de teste dos modelos locais', 'Micro-AUC por cliente, ponderada por amostras')]:
+        data = matched_local_accuracy(policy_runs, metric=metric, strict=True)
+        draw_lines(data, output, filename, title + ' — ' + ' × '.join(policy_runs), ylabel, formats)
+
+
+def matched_local_accuracy(policy_runs, metric="correct", strict=False):
+    indexed = {a: {run: {r['round']: {c['id']: c['local_test'] for c in r['clients']
+                if c.get('local_test', {}).get('samples', 0) > 0} for r in reports}
+                for run, reports in runs} for a, runs in policy_runs.items()}
+    if not indexed:
+        return {}
+    result = {a: [] for a in indexed}
+    for run in sorted(set.intersection(*(set(v) for v in indexed.values()))):
+        series = {a: {} for a in indexed}
+        for rnd in sorted(set.intersection(*(set(v[run]) for v in indexed.values()))):
+            records = [v[run][rnd] for v in indexed.values()]
+            common = set.intersection(*(set(c) for c in records))
+            common = {i for i in common if len({c[i]['samples'] for c in records}) == 1}
+            if strict:
+                common = {i for i in common if all(c[i].get('protocol') in ('local-test-v1', 'local-test-v2') and
+                          c[i].get('partition_sha256') and all(c[i].get(k) is not None and np.isfinite(c[i][k])
+                          for k in ('correct', 'loss_sum', 'auc')) for c in records) and
+                          (all(c[i]['protocol'] == 'local-test-v1' for c in records) or
+                           (all(c[i]['protocol'] == 'local-test-v2' for c in records) and
+                            len({c[i]['partition_sha256'] for c in records}) == 1))}
+            if not common:
+                continue
+            for a, v in indexed.items():
+                series[a][rnd] = sum(v[run][rnd][i][metric] * (v[run][rnd][i]['samples'] if metric == 'auc' else 1) for i in common)/sum(v[run][rnd][i]['samples'] for i in common)
+        for a in series:
+            if series[a]:
+                result[a].append(series[a])
+    return {a: v for a, v in result.items() if v}

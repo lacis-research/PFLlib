@@ -27,9 +27,9 @@ conda activate pfllib
 PYTHON="${PYTHON:-python}"
 DATASET="${DATASET:-Cifar10}" # MNIST, Cifar10, Cifar100, Cinic10, FashionMNIST
 SCENARIO="${SCENARIO:-noniid}"
-NUM_ROUNDS="${NUM_ROUNDS:-30}"
-NUM_CLIENTS="${NUM_CLIENTS:-20}" # vazio: usa config.json existente ou o padrão do gerador
-SELECTION_FRACTION="${SELECTION_FRACTION:-.3}"
+NUM_ROUNDS="${NUM_ROUNDS:-200}"
+NUM_CLIENTS="${NUM_CLIENTS:-30}" # vazio: usa config.json existente ou o padrão do gerador
+SELECTION_FRACTION="${SELECTION_FRACTION:-.2}"
 LOCAL_EPOCHS="${LOCAL_EPOCHS:-10}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
 MODEL="${MODEL:-CNN}" # use MODEL=VGG16 ./start.sh para o experimento com VGG16
@@ -38,11 +38,11 @@ DEVICE_ID="${DEVICE_ID:-0}"
 GOAL="${GOAL:-start-$(date +%Y%m%d-%H%M%S)-$$}"
 ALGORITHMS="${ALGORITHMS:-HERAFL FedLoad FedAvg}" #-HERAFL FedLoad FedAvg
 HERA_SEMANTIC_POLICY="${HERA_SEMANTIC_POLICY:-linucb}" # linucb, heuristic ou legacy (controle preservado)
-HERA_COMMUNICATION="${HERA_COMMUNICATION:-parameters}" # modelo global agregado e protótipos como regularização
+HERA_COMMUNICATION="${HERA_COMMUNICATION:-prototypes}" # ciclo global FedSC: transmite pesos + protótipos e agrega submodelos
 HERA_GLOBAL_ALIGN_WEIGHT="${HERA_GLOBAL_ALIGN_WEIGHT:-1}" # 0: ablação sem regularização por protótipos
 HERA_CLIENT_STORAGE="${HERA_CLIENT_STORAGE:-memory}" # estados locais na RAM da CPU; disk reduz o consumo de RAM
 # Protótipos: cache e checkpoints são removidos após salvar resultados/gráficos.
-# Retomada da variante local: HERA_COMMUNICATION=prototypes ALGORITHMS=HERAFL ./start.sh --hera-keep-checkpoints
+# Preservar checkpoint global e estados dos clientes: HERA_COMMUNICATION=prototypes ALGORITHMS=HERAFL ./start.sh --hera-keep-checkpoints
 HERA_PROTOTYPE_KIND="${HERA_PROTOTYPE_KIND:-relational}" # simple ou relational
 HERA_PROTOTYPE_POLICY="${HERA_PROTOTYPE_POLICY:-resources}" # resources ou semantic
 HERA_ALIGN_WEIGHT="${HERA_ALIGN_WEIGHT:-1}"
@@ -175,12 +175,12 @@ for algorithm in "${algorithms[@]}"; do
         algorithm_args+=(--record-resources)
     elif [[ "$algorithm" == "HERAFL" ]]; then
         algorithm_args+=(--hera-semantic --hera-semantic-policy "$HERA_SEMANTIC_POLICY"
-                          --hera-communication "$HERA_COMMUNICATION")
+                            --hera-communication "$HERA_COMMUNICATION")
         if [[ "$HERA_COMMUNICATION" == "prototypes" ]]; then
             algorithm_args+=(--hera-client-storage "$HERA_CLIENT_STORAGE"
-                              --hera-prototype-kind "$HERA_PROTOTYPE_KIND"
-                              --hera-prototype-policy "$HERA_PROTOTYPE_POLICY"
-                              --hera-align-weight "$HERA_ALIGN_WEIGHT")
+                                --hera-prototype-kind "$HERA_PROTOTYPE_KIND"
+                                --hera-prototype-policy "$HERA_PROTOTYPE_POLICY"
+                                --hera-align-weight "$HERA_ALIGN_WEIGHT")
             if [[ "$HERA_PROTOTYPE_KIND" == "relational" ]]; then
                 algorithm_args+=(--hera-rpcl-weight "$HERA_RPCL_WEIGHT" --hera-cpdr-weight "$HERA_CPDR_WEIGHT")
             fi

@@ -1,4 +1,4 @@
-"""Prototype transport, local persistence, collaboration and checkpoint contracts."""
+"""FedSC global cycle, prototype losses, pruning and checkpoint contracts."""
 import copy
 import contextlib
 import json
@@ -42,9 +42,85 @@ class PrototypeTests(unittest.TestCase):
         server = HERAFL(args, 0)
         self.assertIsInstance(server, PrototypeHERAFL)
         server.result_directory = tmp
-        with patch.object(server, 'save_results'), patch.object(server, 'cleanup_training_artifacts'), patch('flcore.servers.serverfedload.aggregate_submodels', side_effect=AssertionError('weight aggregation')):
+        with patch.object(server, 'save_results'), patch.object(server, 'cleanup_training_artifacts'):
             server.train()
         return server
+
+    def test_global_weighted_aggregation_uses_wire_updates_and_rebroadcasts(self):
+        from flcore.clients.clientheraprototype import clientHERAPrototype
+        original_exchange = clientHERAPrototype.exchange
+        with self.environment() as tmp:
+            server = HERAFL(self.args(global_rounds=2, join_ratio=1., pruning_arms=[1.], detailed_evaluation=True), 0)
+            server.result_directory = tmp
+            initial = copy.deepcopy(server.global_model.state_dict())
+            responses, requests = {}, {}
+            for client in server.clients:
+                client.train_samples = client.id+1
+            def exchange(client, request):
+                message = decode(request)
+                requests[(message['round'], client.id)] = message['state']
+                reply = decode(original_exchange(client, request))
+                # Deliberately differ from the local cache: aggregation must use the wire.
+                reply['state'] = {k: v+client.id*.1 for k, v in reply['state'].items()}
+                responses[(message['round'], client.id)] = reply['state']
+                return encode(reply)
+            with patch.object(clientHERAPrototype, 'exchange', exchange), patch.object(server, 'save_results'):
+                server.train()
+            for name in initial:
+                for client in server.clients:
+                    torch.testing.assert_close(requests[(1, client.id)][name], initial[name])
+                round_one = sum(responses[(1, c.id)][name]*c.train_samples for c in server.clients)/6
+                for client in server.clients:
+                    torch.testing.assert_close(requests[(2, client.id)][name], round_one)
+                expected = sum(responses[(2, c.id)][name]*c.train_samples for c in server.clients)/6
+                torch.testing.assert_close(server.global_model.state_dict()[name], expected)
+            before = copy.deepcopy(server.global_model.state_dict())
+            record = server.evaluate()
+            self.assertEqual(record['evaluation_type'], 'global_model')
+            self.assertAlmostEqual(record['test_sample_weighted']['accuracy'], record['global_accuracy'])
+            self.assertEqual(record['evaluation_communication_bytes'], record['evaluation_telemetry_bytes']+record['evaluation_parameter_bytes'])
+            for name in before:
+                torch.testing.assert_close(server.global_model.state_dict()[name], before[name])
+
+    def test_rejected_updates_preserve_global_and_checkpoint_restores_it(self):
+        with self.environment() as tmp:
+            args = self.args(wait_for_all=False, pruning_round_timeout=1e-12, global_rounds=1)
+            server = self.run_training(args, tmp)
+            for name, value in args.model.state_dict().items():
+                torch.testing.assert_close(server.global_model.state_dict()[name], value)
+            args.hera_resume = str(tmp/'checkpoint')
+            resumed = HERAFL(args, 0)
+            for name, value in server.global_model.state_dict().items():
+                torch.testing.assert_close(resumed.global_model.state_dict()[name], value)
+            self.assertEqual(resumed.rs_train_loss, server.rs_train_loss)
+            self.assertEqual(resumed.rs_test_auc, server.rs_test_auc)
+            root = tmp/'checkpoint'
+            generation = root/json.loads((root/'latest.json').read_text())['directory']
+            state = torch.load(generation/'server.pt', weights_only=False)
+            state['protocol'] = 'herafl-prototypes-v1'
+            torch.save(state, generation/'server.pt')
+            with self.assertRaisesRegex(ValueError, 'Incompatible prototype checkpoint'):
+                HERAFL(args, 0)
+
+    def test_official_cpdr_uses_raw_feature_mse(self):
+        features = torch.tensor([[3., 4.], [20., 30.]], requires_grad=True)
+        cpdr, _ = semantic_losses(features, torch.tensor([0, 2]),
+                                  dict(empty_reference(2), prototypes={0: torch.tensor([1., 1.])}))
+        self.assertEqual(float(cpdr), 3.25)
+        cpdr.backward()
+        torch.testing.assert_close(features.grad[1], torch.zeros(2))
+
+    def test_state_wire_size_is_exact(self):
+        from flcore.heterogeneity.prototype_protocol import state_wire_size
+        for count in (1, 2, 3, 17):
+            state = {'weights': torch.randn(count, 3), 'bias': torch.randn(count)}
+            self.assertEqual(state_wire_size(state), len(encode(state)))
+
+    def test_cpdr_only_ablation_does_not_require_negative_pool(self):
+        reference = dict(empty_reference(2), prototypes={0: torch.ones(2)}, relations={0: torch.ones(1, 2)})
+        cpdr, rpcl = semantic_losses(torch.zeros(1, 2), torch.tensor([0]), reference, compute_contrastive=False)
+        self.assertEqual(float(cpdr), 1.)
+        self.assertEqual(float(rpcl), 0.)
 
     def test_default_storage_trains_without_disk_state_io(self):
         with self.environment() as tmp:
@@ -71,17 +147,18 @@ class PrototypeTests(unittest.TestCase):
                 return ([.5, 1., .5][server.current_round-1], {'selection_mode': 'test'})
             with patch.object(PrototypeHERAFL, 'choose_retention', choice):
                 server = self.run_training(args, tmp)
-            self.assertIsNone(server.global_model)
+            self.assertIsNotNone(server.global_model)
             self.assertEqual(server.reference['round'], 3)
             self.assertEqual(server.eval_rounds, [1, 2, 3])
             self.assertEqual(server.round_reports[-1]['evaluation_clients'], 3)
             self.assertTrue(all(c.model is not c.master for c in server.clients))
             for r in server.round_reports:
-                self.assertIsNone(r['global_accuracy'])
+                self.assertIsNotNone(r['global_accuracy'])
                 for c in r['clients']:
                     stats = c['round_stats']
-                    self.assertEqual(stats['parameter_upload_bytes']+stats['parameter_download_bytes'], 0)
-                    self.assertEqual(stats['total_communication_bytes'], sum(stats[k] for k in ['semantic_upload_bytes', 'semantic_download_bytes', 'control_upload_bytes', 'control_download_bytes']))
+                    self.assertGreater(stats['parameter_upload_bytes'], 0)
+                    self.assertGreater(stats['parameter_download_bytes'], 0)
+                    self.assertEqual(stats['total_communication_bytes'], sum(stats[k] for k in ['semantic_upload_bytes', 'semantic_download_bytes', 'control_upload_bytes', 'control_download_bytes', 'parameter_upload_bytes', 'parameter_download_bytes']))
                     self.assertEqual(c['learning_context'], c['selection_context'])
             before = [copy.deepcopy(c.model.state_dict()) for c in server.clients]
             server.evaluate()
@@ -148,8 +225,9 @@ class PrototypeTests(unittest.TestCase):
             server.reference = dict(round=1, dimension=8, prototypes={0: torch.ones(8)}, relations={}, contributors={0: [4]})
             self.assertFalse(server.snapshot()['prototypes'])
             request = decode(server.request(0, .5, server.snapshot()))
-            self.assertEqual(set(request), {'protocol', 'kind', 'client_id', 'round', 'retention', 'reference', 'options', 'seed', 'system_seed'})
-            self.assertNotIn('state', request)
+            self.assertEqual(set(request), {'protocol', 'kind', 'client_id', 'round', 'retention', 'reference', 'options', 'seed', 'system_seed', 'state'})
+            self.assertIn('state', request)
+            self.assertEqual(set(request['state']), set(server.global_model.state_dict()))
 
     def test_independent_local_control_has_no_learning_network(self):
         with self.environment() as tmp:
@@ -186,7 +264,7 @@ class PrototypeTests(unittest.TestCase):
                 self.assertTrue(server.clients[0].moments)
                 self.assertEqual(server.reference['dimension'], 4096)
                 self.assertTrue(server.reference['prototypes'])
-                self.assertEqual(server.round_reports[-1]['clients'][0]['round_stats']['parameter_upload_bytes'], 0)
+                self.assertGreater(server.round_reports[-1]['clients'][0]['round_stats']['parameter_upload_bytes'], 0)
                 del server
                 gc.collect()
 
@@ -224,6 +302,8 @@ class PrototypeTests(unittest.TestCase):
             return ([.5, 1., .5][server.current_round-1], {'selection_mode': 'test'})
 
         def assert_states(left, right):
+            for name, tensor in left.global_model.state_dict().items():
+                torch.testing.assert_close(tensor, right.global_model.state_dict()[name], rtol=0, atol=0)
             for a, b in zip(left.clients, right.clients):
                 with a.resident(write=False), b.resident(write=False):
                     for attr in ('master', 'model'):
@@ -414,18 +494,22 @@ class PrototypeTests(unittest.TestCase):
             server.save_results()
             import h5py
             with h5py.File(next(tmp.glob('*.h5'))) as f:
-                self.assertIn('rs_local_test_acc', f)
-                self.assertNotIn('rs_test_acc', f)
+                self.assertIn('rs_test_acc', f)
+                self.assertNotIn('rs_local_test_acc', f)
+                self.assertEqual(f.attrs['evaluation_type'], 'global_model')
                 for name, key in (('rs_train_loss', 'train_loss'), ('rs_test_auc', 'test_auc'),
                                   ('rs_test_acc_std', 'test_client_std'), ('rs_test_auc_std', 'test_auc_std')):
                     np.testing.assert_allclose(f[name][:], [server.round_reports[0][key]])
-            self.assertGreater(len(list((tmp/'plots').glob('*.png'))), 3)
-            for name in ('accuracy', 'auc', 'train_loss', 'test_accuracy_std', 'test_auc_std'):
+            self.assertEqual(len(list((tmp/'plots').glob('*.png'))), 9)
+            self.assertTrue((tmp/'global_model.pt').exists())
+            for metric in ('accuracy', 'train_loss', 'test_auc'):
+                self.assertTrue((tmp/'plots'/f'global_{metric}_per_round_comparison.png').exists())
+            for name in ('local_test_auc_per_round_comparison', 'local_test_loss_per_round_comparison', 'local_test_accuracy_per_round_comparison'):
                 self.assertTrue((tmp/'plots'/f'{name}.png').exists(), name)
-            for name in ('global_accuracy_per_round_comparison', 'total_communication_per_experiment_comparison',
+            for name in ('total_communication_per_experiment_comparison',
                          'total_energy_per_experiment_comparison', 'total_round_time_per_experiment_comparison'):
                 self.assertTrue((tmp/'plots'/f'{name}.png').exists(), name)
-            self.assertEqual(json.loads((tmp/'config.json').read_text())['evaluation_type'], 'local_models_sample_weighted')
+            self.assertEqual(json.loads((tmp/'config.json').read_text())['evaluation_type'], 'global_model')
 
 
 if __name__ == '__main__':

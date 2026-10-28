@@ -134,6 +134,38 @@ class clientFedLoad(Client):
         self.bandwidth_history = []
         self.reference_training = getattr(self, 'reference_training', False)
 
+    def local_test_accuracy_metrics(self):
+        """Local test diagnostics, never used for policy rewards."""
+        import hashlib
+        from sklearn.metrics import roc_auc_score
+        mode = self.model.training
+        self.model.eval()
+        correct = samples = 0
+        loss_sum = 0.
+        scores, targets = [], []
+        example_hashes = []
+        try:
+            with torch.no_grad():
+                for x, y in self.load_test_data():
+                    # Hash examples individually so batch size does not affect identity.
+                    for example, target in zip(x, y):
+                        digest = hashlib.sha256()
+                        digest.update(example.cpu().contiguous().numpy().tobytes())
+                        digest.update(target.cpu().contiguous().numpy().tobytes())
+                        example_hashes.append(digest.digest())
+                    x, y = x.to(self.device), y.to(self.device)
+                    logits = self.model(x)
+                    correct += int((logits.argmax(1) == y).sum())
+                    samples += len(y)
+                    loss_sum += float(torch.nn.functional.cross_entropy(logits, y, reduction='sum'))
+                    scores.append(logits.softmax(dim=1).cpu().numpy())
+                    targets.append(torch.nn.functional.one_hot(y, num_classes=logits.shape[1]).cpu().numpy())
+        finally:
+            self.model.train(mode)
+        auc = float(roc_auc_score(np.concatenate(targets).ravel(), np.concatenate(scores).ravel())) if samples else None
+        return dict(correct=correct, samples=samples, loss_sum=loss_sum, auc=auc,
+                    partition_sha256=hashlib.sha256(b''.join(sorted(example_hashes))).hexdigest(), protocol='local-test-v2')
+
     def local_accuracy_metrics(self):
         """Evaluate the client's native PFLlib test partition."""
         if self.validation_fraction:

@@ -196,6 +196,8 @@ class FedLoad(Server):
                           'accuracy': correct / max(samples, 1), 'num_samples': client.train_samples,
                           'selection_context': contexts[client.id], 'alpha_info': assignments[client.id],
                           'round_stats': dict(stats)}
+                if round_index % self.eval_gap == 0:
+                    report['local_test'] = client.local_test_accuracy_metrics()
                 client.offload_submodel()
                 reports.append(report)
                 if accepted:

@@ -678,3 +678,56 @@ integram esse caminho de execução; suas flags antigas não devem ser usadas.
 
 Consulte a [documentação completa](docs/herafl.md), em especial a política de
 retenção/recompensa e a diferença entre os protocolos de parâmetros e protótipos.
+
+
+### Gráficos mantidos e limites dos custos
+
+A geração automática mantém seis gráficos: totais de energia estimada,
+comunicação modelada e tempo acumulado dos clientes; acurácia, loss e AUC dos
+modelos locais no teste, após treino e antes da agregação. As curvas locais ficam
+em `local_test_{accuracy,loss,auc}_per_round_comparison.png` e substituem as curvas
+que misturavam avaliação local/global e loss de treino. HeraFL é laranja; FedLoad azul.
+
+Os três gráficos usam os mesmos clientes na interseção das avaliações de cada
+repetição/rodada, inclusive atualizações rejeitadas, com iguais contagens e hashes
+SHA-256 dos exemplos de teste. Acurácia = soma de acertos / soma de amostras;
+loss = soma da entropia cruzada de classificação / soma de amostras (não inclui
+regularização por protótipos); AUC = média das micro-AUCs dos clientes, ponderada
+por amostras, calculadas com softmax. Não é AUC de todas as predições concatenadas.
+Os registros `clients[].local_test` incluem protocolo, assinatura da partição,
+acertos, amostras, soma de loss e AUC. Séries antigas sem os campos completos não
+são substituídas por métricas globais: exigem nova execução. Essa avaliação
+não alimenta recompensas e permanece fora das estimativas de recursos.
+
+Transferência = bytes × 8 / (Mbps × 10⁶); energia = soma de potência × duração
+na computação e nas transferências. Os totais incluem todos os custos de clientes
+registrados, inclusive rejeitados, e os custos auxiliares disponíveis.
+HeraFL inclui mensagens serializadas, adaptação, extração, validação, inicialização
+e avaliação. FedLoad conta parâmetros e treino, sem cobrir integralmente os mesmos
+custos auxiliares. Portanto, a abrangência ainda não é equivalente. O tempo é soma
+dos tempos dos clientes, não duração real do experimento nem máximo por rodada
+paralela. Energia do servidor e E/S não estão integralmente contabilizadas.
+Esses gráficos não demonstram, isoladamente, vantagem sob um orçamento idêntico.
+
+Compatibilidade: assinaturas `local-test-v1` dependiam da ordem embaralhada do
+carregador e não comprovam identidade de partições. Para esses registros, os
+plots usam IDs de clientes, repetições, rodadas e contagens iguais, assumindo as
+mesmas partições; a limitação é registrada em `local_test_comparison_notes.txt`.
+Novas avaliações `local-test-v2` calculam hashes independentes da ordem e mantêm
+a verificação estrita de identidade dos exemplos.
+
+
+A comparação também gera `global_accuracy_per_round_comparison.png`,
+`global_train_loss_per_round_comparison.png` e `global_test_auc_per_round_comparison.png`
+com as métricas HDF5 das execuções `global_model`. Essas curvas ficam separadas
+das métricas locais: acurácia e AUC globais são de teste; a loss global disponível
+é de treino, conforme a avaliação nativa. O modo `prototypes` do HeraFL agora
+agrega e redistribui pesos globais, além dos protótipos, e entra nessas curvas.
+Resultados antigos com avaliação local e a ablação `--hera-local-only` continuam
+excluídos. É necessário um novo treinamento para obter as métricas globais.
+
+O padrão do `start.sh` usa o ciclo global do FedSC e suas perdas RPCL/CPDR,
+preservando a poda e o LinUCB do HeraFL. O caminho semântico segue o código
+oficial local `../FedSC` (commit `a04dc8e`): RPCL sem cálculo explícito de U e
+CPDR com MSE. A varredura do dataset a cada minibatch foi removida. Consulte
+[protocolo, perdas e limitações](docs/herafl.md).

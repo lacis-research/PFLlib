@@ -1,4 +1,4 @@
-"""HERAFL prototype transport: persistent clients, no weight aggregation."""
+"""HERAFL: FedSC global training with structured pruning and prototype exchange."""
 import copy
 import json
 import math
@@ -13,9 +13,9 @@ from flcore.servers.serverfedload import FedLoad
 from flcore.clients.clientheraprototype import clientHERAPrototype
 from flcore.heterogeneity.linucb_fedload import LinUCBBandit
 from flcore.heterogeneity.semantic import SemanticLinUCB, history_context
-from flcore.heterogeneity.pruning import prune_model
+from flcore.heterogeneity.pruning import prune_model, aggregate_submodels
 from flcore.heterogeneity.prototype_protocol import (
-    PROTOCOL, encode, decode, empty_reference, read_payload, build_reference, resource_stats,
+    PROTOCOL, encode, decode, empty_reference, read_payload, build_reference, resource_stats, state_wire_size, FEDSC_REFERENCE,
 )
 
 
@@ -110,8 +110,8 @@ class PrototypeHERAFL(HERAFL):
             self.costs[arm] = dict(bytes=size, fraction=size/full,
                                    predicted_memory=size*(5 if getattr(template, 'optimizer_kind', 'sgd') == 'adam' else 3))
             del sub
-        # Only client-local initialization/checkpoint states remain, never a global trained model.
-        self.global_model = None
+        # The independent-local ablation is the only mode without global weights.
+        self.global_model = None if self.local_only else template
         if self.use_semantic_policy:
             self.bandit.legacy_policy = copy.deepcopy(self.bandit)
             self.bandit.enable(getattr(args, 'hera_semantic_policy', 'linucb'))
@@ -143,9 +143,14 @@ class PrototypeHERAFL(HERAFL):
                 context.update(history_context(self.history.get(i), self.current_round, self.max_age, self.semantic_features))
         return contexts
 
-    def request(self, client_id, retention, reference):
+    @property
+    def evaluation_type(self):
+        return 'local_models_sample_weighted' if self.local_only else 'global_model'
+
+    def request(self, client_id, retention, reference, include_state=True):
         return encode(dict(protocol=PROTOCOL, kind='train', client_id=client_id, round=self.current_round,
                            retention=retention, reference=reference, options=self.options,
+                           state=None if self.local_only or not include_state else self.global_model.state_dict(),
                            seed=self.experiment_seed+self.current_round*self.num_clients+client_id if self.aligned_comparison else None,
                            system_seed=[self.experiment_seed, self.current_round, client_id]))
 
@@ -153,11 +158,14 @@ class PrototypeHERAFL(HERAFL):
         # Upper estimate of class coverage + metadata, independent of parameter bytes.
         upload_estimate = self.num_classes*(self.dimension*4*4/3+128)+4096
         costs = {}
+        download_weights = 0 if self.local_only else state_wire_size(self.global_model.state_dict())-4
         for arm, spec in self.costs.items():
             previous = next(c.round_stats for c in self.clients if c.id == client_id)
             compute = (previous['compute_time']*spec['fraction']/max(previous.get('parameter_fraction', 1), 1e-12)
                        if previous else self.max_samples*.002*(self.local_epochs+1)*spec['fraction'])
-            seconds = compute+(len(self.request(client_id, arm, reference))+upload_estimate)*8/(context['throughput_mbps']*1e6)
+            # JSON float32/base64 transport, including global download and submodel upload.
+            parameter_bytes = 0 if self.local_only else spec['bytes']*4/3
+            seconds = compute+(len(self.request(client_id, arm, reference, include_state=False))+download_weights+upload_estimate+parameter_bytes)*8/(context['throughput_mbps']*1e6)
             costs[arm] = dict(spec, predicted_time=seconds, feasible=(self.memory_limit is None or spec['predicted_memory'] <= self.memory_limit)
                               and (self.time_limit is None or seconds <= self.time_limit))
         if self.use_semantic_policy:
@@ -177,14 +185,23 @@ class PrototypeHERAFL(HERAFL):
 
     def evaluate(self, *unused, **kwargs):
         metrics, seconds, byte_count, energy, transfer = [], 0., 0, 0., 0.
+        parameter_bytes = 0 if self.local_only else state_wire_size(self.global_model.state_dict())
         for client in self.clients:
             with client.resident(write=False):
-                message = client.evaluate_local()
+                local_model = client.model
+                try:
+                    if not self.local_only:
+                        client.model = self.global_model
+                    message = client.evaluate_local(detailed=not self.local_only and getattr(self.args, 'detailed_evaluation', False))
+                finally:
+                    client.model = local_model
             record = decode(message)
             byte_count += len(message)
             seconds += record['evaluation_time']
             transmission = len(message)*8/(client.profile.get('sampled_throughput_mbps', client.profile.get('throughput_mbps', 10.))*1e6)
-            transfer += transmission
+            download = parameter_bytes*8/(client.profile.get('sampled_throughput_mbps', client.profile.get('throughput_mbps', 10.))*1e6)
+            transfer += transmission+download
+            energy += download*client.profile.get('e_down_w', client.profile.get('e_down', .5))
             energy += transmission*client.profile.get('e_up_w', client.profile.get('e_up', .5)) + record['evaluation_time']*client.profile.get('e_cmp_w', client.profile.get('e_cmp', .5))
             record['accuracy'] = record['correct']/record['samples'] if record['samples'] else None
             metrics.append(record)
@@ -200,15 +217,27 @@ class PrototypeHERAFL(HERAFL):
         print(f'Std Test Accuracy: {np.std(valid):.4f}')
         print(f'Std Test AUC: {auc_std:.4f}')
         self.rs_test_acc.append(weighted)
+        self.rs_train_loss.append(train_loss)
+        self.rs_test_auc.append(auc)
         self.eval_rounds.append(self.current_round)
-        return dict(evaluation_type='local_models_sample_weighted', local_accuracy=weighted,
+        details = {}
+        if metrics and all('confusion' in r for r in metrics):
+            from flcore.heterogeneity.semantic import summarize_confusion
+            total = sum(torch.tensor(r['confusion'], dtype=torch.int64) for r in metrics)
+            details['test_sample_weighted'] = summarize_confusion(total)
+            for record in metrics:
+                record.update(summarize_confusion(torch.tensor(record['confusion'], dtype=torch.int64)))
+        return dict(evaluation_type=self.evaluation_type,
+                    **({'local_accuracy': weighted} if self.local_only else {'global_accuracy': weighted}),
                     train_loss=train_loss, test_auc=auc, test_auc_std=auc_std,
                     test_clients=metrics, test_client_mean=float(np.mean(valid)) if valid else None,
                     test_client_median=float(np.median(valid)) if valid else None,
                     test_client_p10=float(np.percentile(valid, 10)) if valid else None,
                     test_client_std=float(np.std(valid)) if valid else None,
                     evaluation_clients=len(metrics), evaluation_time=seconds, evaluation_telemetry_bytes=byte_count,
-                    evaluation_total_time=seconds+transfer, evaluation_energy=energy)
+                    evaluation_parameter_bytes=parameter_bytes*len(metrics),
+                    evaluation_communication_bytes=byte_count+parameter_bytes*len(metrics),
+                    evaluation_total_time=seconds+transfer, evaluation_energy=energy, **details)
 
     def train(self):
         for index in range(self.current_round+1, self.global_rounds+1):
@@ -230,7 +259,7 @@ class PrototypeHERAFL(HERAFL):
                     pending.append(arm)
             active_count = int((1-self.client_drop_rate)*len(self.selected_clients))
             active = {c.id for c in random.Random(self.experiment_seed+index).sample(self.selected_clients, active_count)}
-            reports, accepted_payloads = [], []
+            reports, accepted_payloads, accepted_updates = [], [], []
             for client in self.selected_clients:
                 arm, info = assignments[client.id]
                 report = dict(id=client.id, retention=arm, selection_context=contexts[client.id], alpha_info=info,
@@ -244,17 +273,25 @@ class PrototypeHERAFL(HERAFL):
                 else:
                     with client.resident():
                         response = client.exchange(request)
+                if index % self.eval_gap == 0:
+                    with client.resident(write=False):
+                        client.model.to(client.device)
+                        report['local_test'] = client.local_test_accuracy_metrics()
+                        client.model.cpu()
                 message = decode(response)
-                if set(message) != {'protocol', 'kind', 'payload', 'telemetry'} or message['protocol'] != PROTOCOL or message['kind'] != 'response':
+                if set(message) != {'protocol', 'kind', 'payload', 'telemetry', 'state'} or message['protocol'] != PROTOCOL or message['kind'] != 'response':
                     raise ValueError('Unexpected response type.')
                 payload = read_payload(message['payload'], self.dimension, self.num_classes, index, client.id)
                 telemetry = message['telemetry']
+                report['loss_diagnostics'] = telemetry.get('loss_diagnostics', [])
                 stats = resource_stats(telemetry, 0 if self.local_only else len(response), 0 if self.local_only else len(request), client.profile)
                 # Exact wire decomposition: semantic object bytes + envelope/control remainder.
                 stats['semantic_download_bytes'] = len(encode(reference))
                 stats['semantic_upload_bytes'] = len(encode(message['payload']))
-                stats['control_download_bytes'] = len(request)-stats['semantic_download_bytes']
-                stats['control_upload_bytes'] = len(response)-stats['semantic_upload_bytes']
+                stats['parameter_download_bytes'] = 0 if self.local_only else state_wire_size(self.global_model.state_dict())
+                stats['parameter_upload_bytes'] = 0 if self.local_only else state_wire_size(message['state'])
+                stats['control_download_bytes'] = len(request)-stats['semantic_download_bytes']-stats['parameter_download_bytes']
+                stats['control_upload_bytes'] = len(response)-stats['semantic_upload_bytes']-stats['parameter_upload_bytes']
                 if self.local_only:
                     for key in ('semantic_download_bytes', 'semantic_upload_bytes', 'control_download_bytes', 'control_upload_bytes'):
                         stats[key] = 0
@@ -269,6 +306,10 @@ class PrototypeHERAFL(HERAFL):
                               round_stats=stats, semantic_payload=payload.metadata())
                 if accepted and not self.local_only:
                     accepted_payloads.append(payload)
+                    # Reconstruct from the same global weights/retention, not client cache.
+                    submodel, coordinates = prune_model(self.global_model, arm, device='cpu', preserve_representation=True)
+                    submodel.load_state_dict(message['state'], strict=True)
+                    accepted_updates.append((submodel, coordinates, client.train_samples))
             accepted = [r for r in reports if r['status'] == 'accepted']
             time_reference = float(np.mean([r['round_stats']['round_time'] for r in accepted])) if accepted else 0.
             for report in ([] if self.local_only else accepted):
@@ -281,10 +322,15 @@ class PrototypeHERAFL(HERAFL):
             for report in accepted:
                 self.arm_energy_history[report['retention']].append(report['round_stats']['energy_consumption'])
             aggregate_start = time.perf_counter()
-            self.reference = build_reference(accepted_payloads, self.reference, index, self.num_classes, self.kind, self.neighbors)
+            if not self.local_only:
+                self.global_model = aggregate_submodels(self.global_model, accepted_updates)
+            parameter_aggregation_time = time.perf_counter()-aggregate_start
+            aggregate_start = time.perf_counter()
+            self.reference = build_reference(accepted_payloads, self.reference, index, self.num_classes, self.kind, self.neighbors, device=self.device)
             aggregation_time = time.perf_counter()-aggregate_start
             self.history.update({p.client_id: p for p in accepted_payloads})
             record = dict(round=index, clients=reports, protocol=PROTOCOL, global_accuracy=None,
+                          parameter_aggregation_time=parameter_aggregation_time,
                           semantic_aggregation_time=aggregation_time, semantic_bank_round=self.reference['round'],
                           round_timeout=None if math.isinf(self.base_round_timeout) else self.base_round_timeout)
             if index == 1:
@@ -367,6 +413,7 @@ class PrototypeHERAFL(HERAFL):
                 else:
                     torch.save(client.checkpoint(clone=False), path/f'client_{client.id}.pt')
             state = dict(protocol=PROTOCOL, signature=self.config_signature(), model=self.model_name, model_shapes=self.model_shapes, round=self.current_round,
+                         global_state=None if self.local_only else self.global_model.state_dict(),
                          bandit=self.bandit, reference=self.reference, history=self.history, contexts=self.contexts,
                          energy=self.arm_energy_history, reports=self.round_reports, accuracies=self.rs_test_acc,
                          eval_rounds=self.eval_rounds, budget=self.Budget, initialization_bytes=self.initialization_bytes,
@@ -397,6 +444,8 @@ class PrototypeHERAFL(HERAFL):
         state = torch.load(path/'server.pt', map_location='cpu', weights_only=False)
         if state['protocol'] != PROTOCOL or state['signature'] != self.config_signature() or state['model'] != self.model_name or state['model_shapes'] != self.model_shapes:
             raise ValueError('Incompatible prototype checkpoint configuration.')
+        if not self.local_only:
+            self.global_model.load_state_dict(state['global_state'], strict=True)
         for client in self.clients:
             client_state = torch.load(path/f'client_{client.id}.pt', map_location='cpu', weights_only=False)
             if 'tensor_file' in client_state:
@@ -413,6 +462,8 @@ class PrototypeHERAFL(HERAFL):
         self.reference, self.history, self.contexts = state['reference'], state['history'], state['contexts']
         self.arm_energy_history, self.round_reports = state['energy'], state['reports']
         self.rs_test_acc, self.eval_rounds, self.Budget = state['accuracies'], state['eval_rounds'], state['budget']
+        self.rs_train_loss = [r['train_loss'] for r in self.round_reports if r['round'] in self.eval_rounds]
+        self.rs_test_auc = [r['test_auc'] for r in self.round_reports if r['round'] in self.eval_rounds]
         self.initialization_bytes, self.initialization_client_stats = state['initialization_bytes'], state['initialization_stats']
         torch.set_rng_state(state['rng'])
         if state['cuda_rng'] is not None and torch.cuda.is_available():
@@ -423,22 +474,23 @@ class PrototypeHERAFL(HERAFL):
     def save_results(self):
         directory = self.output_directory()
         stem = f'{self.dataset}_{self.algorithm}_{self.goal}_{self.times}'
-        config = dict(protocol=PROTOCOL, evaluation_type='local_models_sample_weighted', model=self.model_name,
-                      training_config=self.config_signature(), initialization='one_time_weight_distribution',
+        config = dict(protocol=PROTOCOL, evaluation_type=self.evaluation_type, model=self.model_name,
+                      training_config=self.config_signature(), initialization='one_time_weight_distribution' if self.local_only else 'global_weights_each_round',
+                      loss_definition='fedsc-official', fedsc_reference=FEDSC_REFERENCE,
                       initialization_bytes=self.initialization_bytes, prototype_options=self.options,
                       prototype_kind=self.kind, local_only=self.local_only, resume_supported=True,
                       local_storage=self.client_storage,
-                      local_storage_details='Master weights, dormant optimizer moments and last submodel; one resident client in disk mode',
+                      local_storage_details='CPU master and last submodel; optimizer reset on global download; one resident client in disk mode',
                       initialization_client_stats=self.initialization_client_stats)
         partition = Path('../dataset')/self.dataset/'config.json'
         config['partition_metadata'] = json.loads(partition.read_text()) if partition.exists() else None
         (directory/'config.json').write_text(json.dumps(config, indent=2, allow_nan=False))
         (directory/f'{stem}_policy.json').write_text(json.dumps(self.round_reports, indent=2, allow_nan=False))
         with h5py.File(directory/f'{stem}.h5', 'w') as stream:
-            stream.attrs['evaluation_type'] = 'local_models_sample_weighted'
+            stream.attrs['evaluation_type'] = self.evaluation_type
             stream.attrs['protocol'] = PROTOCOL
-            stream.attrs['variant'] = f'{self.kind}:local_only={self.local_only}:semantic_policy={self.use_semantic_policy}'
-            stream.create_dataset('rs_local_test_acc', data=self.rs_test_acc)
+            stream.attrs['variant'] = f'{PROTOCOL}:loss=fedsc-official-{FEDSC_REFERENCE}:{self.kind}:local_only={self.local_only}:semantic_policy={self.use_semantic_policy}'
+            stream.create_dataset('rs_local_test_acc' if self.local_only else 'rs_test_acc', data=self.rs_test_acc)
             stream.create_dataset('eval_rounds', data=self.eval_rounds)
             evaluations = {r['round']: r for r in self.round_reports}
             for name, key in (('rs_train_loss', 'train_loss'), ('rs_test_auc', 'test_auc'),
@@ -447,13 +499,17 @@ class PrototypeHERAFL(HERAFL):
                     stream.create_dataset(name, data=[evaluations[r][key] for r in self.eval_rounds])
         import sys
         sys.path.insert(0, str(Path(__file__).resolve().parents[3]/'tools'))
-        from plot_comparison import render_experiment_metrics
-        render_experiment_metrics(directory/f'{stem}.h5', directory/'plots')
         from comparison_metrics import render_reference_comparison
         render_reference_comparison(
             {self.algorithm: [dict(zip(self.eval_rounds, self.rs_test_acc))]},
             {self.algorithm: [(self.times, self.round_reports)]}, directory/'plots', ['png'],
-            evaluation_types={self.algorithm: 'local_models_sample_weighted'})
-        from contribution_plots import render_contributions
-        render_contributions({f'HERAFL {"independent" if self.local_only else "prototypes"} ({self.kind}; local)': [dict(id=f'run {self.times}', reports=self.round_reports,
-                              accuracy=dict(zip(self.eval_rounds, self.rs_test_acc)), evaluation_type='local_models_sample_weighted')]}, directory/'plots')
+            evaluation_types={self.algorithm: self.evaluation_type})
+        if not self.local_only:
+            from plot_comparison import render_global_metrics
+            metrics = {}
+            for name, key, scale in [('rs_test_acc', 'global_accuracy', 100.),
+                                     ('rs_train_loss', 'train_loss', 1.), ('rs_test_auc', 'test_auc', 1.)]:
+                series = {r['round']: r[key]*scale for r in self.round_reports if r.get(key) is not None}
+                metrics[name] = {self.algorithm: [series]}
+            render_global_metrics(metrics, {self.algorithm: self.evaluation_type}, directory/'plots')
+            torch.save(self.global_model.state_dict(), directory/'global_model.pt')

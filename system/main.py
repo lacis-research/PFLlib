@@ -528,7 +528,7 @@ if __name__ == "__main__":
     parser.add_argument('--hera-semantic', action='store_true')
     parser.add_argument('--hera-semantic-policy', choices=['linucb', 'heuristic', 'legacy'], default='linucb')
     parser.add_argument('--hera-communication', choices=['parameters', 'prototypes'], default='parameters')
-    parser.add_argument('--hera-prototype-kind', choices=['simple', 'relational'], default='simple')
+    parser.add_argument('--hera-prototype-kind', choices=['simple', 'relational'], default='relational')
     parser.add_argument('--hera-prototype-policy', choices=['resources', 'semantic'], default='resources')
     parser.add_argument('--hera-align-weight', type=float, default=1.)
     parser.add_argument('--hera-global-align-weight', type=float, default=0., help='Normalized prototype alignment weight with parameter aggregation; requires --hera-semantic. Zero disables regularization.')
@@ -543,8 +543,8 @@ if __name__ == "__main__":
     parser.add_argument('--hera-semantic-warmup-rounds', type=int, default=1)
     parser.add_argument('--hera-semantic-reward-weight', type=float, default=0.)
     parser.add_argument('--hera-semantic-reward-time-scale', type=float, default=60.)
-    parser.add_argument('--hera-rpcl-weight', type=float, default=0.)
-    parser.add_argument('--hera-cpdr-weight', type=float, default=0.)
+    parser.add_argument('--hera-rpcl-weight', type=float, default=None, help='Default 1 for relational prototypes, 0 otherwise.')
+    parser.add_argument('--hera-cpdr-weight', type=float, default=None, help='Default 1 for relational prototypes, 0 otherwise.')
     parser.add_argument('--hera-semantic-temperature', type=float, default=.05)
     parser.add_argument('--hera-semantic-neighbors', type=int, default=1)
     parser.add_argument('--hera-heuristic-weight', type=float, default=.6)
@@ -577,6 +577,10 @@ if __name__ == "__main__":
     parser.add_argument('--scenario', choices=['iid', 'non-iid'], default='iid')
     parser.add_argument('--reference-training', action='store_true', help='Use the Mininet optimizer with MininetCNN.')
     args = parser.parse_args()
+    relational = args.hera_communication == 'prototypes' and args.hera_prototype_kind == 'relational'
+    for key in ('hera_rpcl_weight', 'hera_cpdr_weight'):
+        if getattr(args, key) is None:
+            setattr(args, key, 1. if relational else 0.)
     if args.wait_for_all:
         args.aligned_comparison = True
     args.model = {'vgg11': 'VGG11', 'vgg16': 'VGG16'}.get(args.model.lower(), args.model)
