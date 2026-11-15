@@ -1,5 +1,7 @@
 """HERAFL adds capacity guidance and an online straggler predictor to FedLoad."""
 import numpy as np
+import json
+from pathlib import Path
 from flcore.servers.serverfedload import FedLoad
 from flcore.clients.clientherafl import clientHERAFL
 from flcore.heterogeneity.linucb_hera import LinUCBBandit
@@ -54,3 +56,21 @@ class HERAFL(FedLoad):
         self.selector.set_contexts(self.contexts, self.initial_contexts)
         ids = self.selector.select_trainers_for_round([c.id for c in self.clients], {})
         return [self.clients[i] for i in ids]
+
+    def save_policy_results(self):
+        super().save_policy_results()
+        from flcore.heterogeneity.results import result_directory
+        config = result_directory(self) / 'config.json'
+        metadata = json.loads(config.read_text())
+        source = Path('../dataset') / self.dataset / 'config.json'
+        if source.exists():
+            metadata['dataset_config'] = json.loads(source.read_text())
+        metadata['local_class_evaluation'] = {
+            'model': 'trained_local_submodel_before_aggregation',
+            'seen_definition': 'class_present_in_actual_local_training_data',
+            'absent_definition': 'class_absent_from_local_training_data_not_necessarily_global_training',
+            'empty_group_accuracy': None,
+            'reward': 'unchanged_all_local_test_samples',
+            'train_classes_by_client': {str(c.id): c.training_class_ids() for c in self.clients},
+        }
+        config.write_text(json.dumps(metadata, indent=2, allow_nan=False))

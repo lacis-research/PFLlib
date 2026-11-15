@@ -34,6 +34,8 @@ Figure 1: An Example for FedAvg. You can create a scenario using `generate_DATA.
 ```
 ### FedLoad e HERAFL
 
+HERA-FL: [drift por distribuição Dirichlet e classes ausentes no treino local](docs/herafl_class_shift.md).
+
 Adaptações nativas dos algoritmos de `mininetfed_iwcmc`, usando servidores, clientes, modelos e dados do PFLlib: [execução, perfis de recursos e limitações](docs/heterogeneous_algorithms.md).
 
 ### Key Features
@@ -689,3 +691,10 @@ A atualização do LinUCB e do preditor do HERAFL recebe o mesmo contexto usado 
 escolha. As métricas observadas continuam fornecendo a recompensa e o alvo do
 preditor. Os relatórios JSON preservam `selection_context`, `learning_context`
 e o contexto observado; o `config.json` salva pisos e limiares utilizados.
+
+## Resultados locais: IID e Dirichlet
+
+Logs, configurações, métricas e gráficos das execuções concluídas estão em
+[resultados-drift/2026-11-15](resultados-drift/2026-11-15/README.md).
+A pasta inclui a base IID e o cenário com distribuição Dirichlet, mantendo
+as mesmas imagens de treino/teste. Os arquivos foram verificados por SHA-256.

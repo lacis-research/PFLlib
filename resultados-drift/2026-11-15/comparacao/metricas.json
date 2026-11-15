@@ -1,0 +1,113 @@
+{
+  "iid": {
+    "final": 0.7870666666666667,
+    "best": 0.7926666666666666,
+    "best_round": 197,
+    "mean_last20": 0.78203,
+    "std_last20": 0.006379497542039573,
+    "rounds": 200,
+    "accepted": 1200,
+    "retention_mean": 0.7295833333333334,
+    "retention_last20": 0.7064814814814815,
+    "result_directory": "/media/bolla/HD UTILIT\u00c1RIOS/testesherafl/PFLlib/results/herafl/20261114_01h19m33s_064449_hera_fl_experiment_cifar10_iid_run0",
+    "first_round_above_50": 12,
+    "compute_time": 2408.26644128498,
+    "energy_consumption": 502816.14604871685,
+    "total_communication_bytes": 148582567072,
+    "round_time": 269887.1419992824,
+    "reported_seconds": 4737.87
+  },
+  "dirichlet": {
+    "final": 0.5206666666666667,
+    "best": 0.5253333333333333,
+    "best_round": 189,
+    "mean_last20": 0.4173266666666667,
+    "std_last20": 0.08379348131633577,
+    "rounds": 200,
+    "accepted": 1200,
+    "retention_mean": 0.7299537037037037,
+    "retention_last20": 0.7083333333333334,
+    "result_directory": "/media/bolla/HD UTILIT\u00c1RIOS/testesherafl/PFLlib/results/herafl/20261115_15h03m23s_437025_hera_fl_experiment_cifar10dirichletfull30_non_iid_run0",
+    "first_round_above_50": 99,
+    "compute_time": 2436.0425771250502,
+    "energy_consumption": 507924.81092618295,
+    "total_communication_bytes": 149134877816,
+    "round_time": 272763.6843855057,
+    "local_seen_all": {
+      "correct": 128853,
+      "samples": 237167,
+      "accuracy": 0.543300712156413
+    },
+    "local_seen_last20": {
+      "correct": 13924,
+      "samples": 22696,
+      "accuracy": 0.6135001762425097
+    },
+    "local_seen_last": {
+      "correct": 659,
+      "samples": 983,
+      "accuracy": 0.6703967446592065
+    },
+    "local_absent_all": {
+      "correct": 2682,
+      "samples": 362833,
+      "accuracy": 0.007391830401314103
+    },
+    "local_absent_last20": {
+      "correct": 788,
+      "samples": 37304,
+      "accuracy": 0.021123740081492603
+    },
+    "local_absent_last": {
+      "correct": 12,
+      "samples": 2017,
+      "accuracy": 0.005949429846306396
+    },
+    "reported_seconds": 4783.86
+  },
+  "checks": {
+    "same_schedules": true,
+    "same_profiles": true,
+    "same_hyperparameters": true,
+    "train_total": 45000,
+    "test_total": 15000,
+    "class_counts": [
+      3,
+      3,
+      3,
+      4,
+      4,
+      4,
+      3,
+      4,
+      6,
+      9,
+      2,
+      2,
+      3,
+      5,
+      8,
+      5,
+      4,
+      3,
+      2,
+      3,
+      3,
+      4,
+      4,
+      5,
+      5,
+      4,
+      5,
+      2,
+      4,
+      2
+    ]
+  },
+  "relative": {
+    "reported_seconds": 0.970689360408783,
+    "compute_time": 1.1533663951755146,
+    "energy_consumption": 1.0160105075406989,
+    "total_communication_bytes": 0.37171974807270747
+  }
+}
