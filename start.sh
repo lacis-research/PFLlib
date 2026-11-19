@@ -25,9 +25,9 @@ conda activate pfllib
 
 # Usa o Python do ambiente ativado, salvo sobrescrita explícita.
 PYTHON="${PYTHON:-python}"
-DATASET="${DATASET:-cifar10}"
+DATASET="${DATASET:-mnist}"
 SCENARIO="${SCENARIO:-iid}"
-NUM_ROUNDS="${NUM_ROUNDS:-200}"
+NUM_ROUNDS="${NUM_ROUNDS:-50}"
 NUM_CLIENTS="${NUM_CLIENTS:-30}" # vazio: usa config.json existente ou o padrão do gerador
 SELECTION_FRACTION="${SELECTION_FRACTION:-0.2}"
 LOCAL_EPOCHS="${LOCAL_EPOCHS:-5}"
@@ -40,6 +40,10 @@ ALGORITHMS="${ALGORITHMS:-HERAFL FedLoad FedAvg}"
 STRAGGLER_PREDICTOR="${STRAGGLER_PREDICTOR:-true}"
 BALANCE="${BALANCE:-balance}"
 PARTITION="${PARTITION:-dir}"
+DATA_PROTOCOL="${DATA_PROTOCOL:-fedsc}" # native ou fedsc (Dirichlet + cauda longa)
+FEDSC_ALPHA="${FEDSC_ALPHA:-0.05}"
+FEDSC_IMB_FACTOR="${FEDSC_IMB_FACTOR:-0.1}"
+FEDSC_SEED="${FEDSC_SEED:-66}"
 COMPARE="${COMPARE:-1}"
 # Tabela I e seção IV do artigo FedLoad.
 BANDIT_ALPHA="${BANDIT_ALPHA:-0.5}"
@@ -95,6 +99,26 @@ for i in "${!algorithms[@]}"; do
     esac
 done
 
+# FedSC prepara uma cópia independente da base existente; todos os métodos
+# abaixo recebem exatamente o mesmo dataset. Não sobrescreve a base nativa.
+case "$DATA_PROTOCOL" in
+    native) ;;
+    fedsc)
+        fedsc_args=(--source-dataset "$SCRIPT_DIR/dataset/$DATASET"
+                    --alpha "$FEDSC_ALPHA" --imb-factor "$FEDSC_IMB_FACTOR" --seed "$FEDSC_SEED")
+        if [[ -n "$NUM_CLIENTS" ]]; then
+            fedsc_args+=(--num-clients "$NUM_CLIENTS")
+        fi
+        if [[ "$COMPARE_ONLY" == "1" ]]; then
+            fedsc_args+=(--reuse-only)
+        fi
+        dataset_config="$("$PYTHON" tools/prepare_fedsc.py "${fedsc_args[@]}")"
+        read -r dataset_clients dataset_classes DATASET <<< "$dataset_config"
+        SCENARIO=non-iid
+        ;;
+    *) echo "DATA_PROTOCOL deve ser native ou fedsc." >&2; exit 1 ;;
+esac
+
 # Recupera a comparação sem preparar datasets ou repetir treinamentos.
 if [[ "$COMPARE_ONLY" == "1" ]]; then
     comparison_args=(--dataset "$DATASET" --algorithms "${algorithms[@]}")
@@ -107,13 +131,15 @@ if [[ "$COMPARE_ONLY" == "1" ]]; then
 fi
 
 # Reutiliza partições compatíveis ou chama o gerador nativo automaticamente.
-prepare_args=(--dataset "$DATASET" --scenario "$SCENARIO"
-              --balance "$BALANCE" --partition "$PARTITION")
-if [[ -n "$NUM_CLIENTS" ]]; then
-    prepare_args+=(--num-clients "$NUM_CLIENTS")
+if [[ "$DATA_PROTOCOL" == "native" ]]; then
+    prepare_args=(--dataset "$DATASET" --scenario "$SCENARIO"
+                  --balance "$BALANCE" --partition "$PARTITION")
+    if [[ -n "$NUM_CLIENTS" ]]; then
+        prepare_args+=(--num-clients "$NUM_CLIENTS")
+    fi
+    dataset_config="$("$PYTHON" tools/prepare_dataset.py "${prepare_args[@]}")"
+    read -r dataset_clients dataset_classes DATASET <<< "$dataset_config"
 fi
-dataset_config="$("$PYTHON" tools/prepare_dataset.py "${prepare_args[@]}")"
-read -r dataset_clients dataset_classes DATASET <<< "$dataset_config"
 
 common_args=( 
     -data "$DATASET" -m "$MODEL" -gr "$NUM_ROUNDS"

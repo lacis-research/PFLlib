@@ -2,7 +2,8 @@
 
 Source: utils/sample_dirichlet.py at a04dc8e630706a0c3f12f716c45857ead95a4940
 https://github.com/hwang52/FedSC/blob/a04dc8e630706a0c3f12f716c45857ead95a4940/utils/sample_dirichlet.py
-The upstream helper functions below are kept unchanged; input validation,
+The upstream draws and balancing are preserved, with a bounded retry loop
+that rejects pathological configurations rather than hanging. Input validation,
 held-out test handling live in prepare_hera_shift.py.
 Source SHA-256: 62958f67aac8354e1f6aff95f1c95a2c53c87892e3d43930c029a430070f3b42
 """
@@ -93,7 +94,11 @@ def build_non_iid_by_dirichlet(seed, indices2targets, non_iid_alpha, num_classes
         # get the corresponding idx_batch.
         min_size = 0
         _idx_batch = None
+        attempts = 0
         while min_size < int(0.50 * _targets_size / _n_workers):
+            attempts += 1
+            if attempts > 10000:
+                raise ValueError('FedSC sampler did not converge after 10000 draws; increase alpha or available samples.')
             _idx_batch = [[] for _ in range(_n_workers)]
             for _class in range(num_classes):
                 # get the corresponding indices in the original 'targets' list.

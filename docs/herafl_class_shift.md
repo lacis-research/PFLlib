@@ -1,5 +1,11 @@
 # HERA-FL com Dirichlet e todas as imagens da base
 
+Para o cenário completo do FedSC, com cauda longa exponencial e integração
+ao `start.sh`, consulte [Cenários FedSC](fedsc_scenarios.md). O
+`examples/run_hera_shift.sh` agora executa esse cenário completo de forma
+portátil. O protocolo abaixo continua disponível no preparador ao omitir
+`--imb-factor`; os caminhos externos descritos abaixo são históricos.
+
 Protocolo atual: `hera_dirichlet_full_data_v3`. A única mudança nos dados da
 base é a atribuição das imagens de treino aos UEs pelo particionador Dirichlet
 original do FedSC. Todas as imagens de treino são preservadas e as classes ausentes surgem da amostragem.

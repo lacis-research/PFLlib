@@ -34,7 +34,8 @@ Figure 1: An Example for FedAvg. You can create a scenario using `generate_DATA.
 ```
 ### FedLoad e HERAFL
 
-HERA-FL: [drift por distribuição Dirichlet e classes ausentes no treino local](docs/herafl_class_shift.md).
+HERA-FL: [distribuição Dirichlet e classes ausentes no treino local](docs/herafl_class_shift.md).
+Cenários FedSC implementados: [Dirichlet + cauda longa exponencial, execução e validação](docs/fedsc_scenarios.md).
 
 Adaptações nativas dos algoritmos de `mininetfed_iwcmc`, usando servidores, clientes, modelos e dados do PFLlib: [execução, perfis de recursos e limitações](docs/heterogeneous_algorithms.md).
 

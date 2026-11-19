@@ -47,6 +47,9 @@ def save_policy_results(server):
                     global_rounds=server.global_rounds, local_epochs=server.local_epochs,
                     batch_size=server.batch_size, learning_rate=server.learning_rate,
                     client_profiles={str(c.id): c.profile for c in server.clients})
+    dataset_config = Path('../dataset') / server.dataset / 'config.json'
+    if dataset_config.exists():
+        metadata['dataset_config'] = json.loads(dataset_config.read_text())
     if server.algorithm == 'HERAFL':
         metadata.update(hera_retention_floors=server.bandit.retention_floors,
                         hera_capacity_thresholds=server.bandit.capacity_thresholds,
